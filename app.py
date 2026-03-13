@@ -110,6 +110,25 @@ FONTFILE = detect_fontfile()
 FONT_OPT = f":fontfile={FONTFILE}" if FONTFILE else ""
 
 
+def detect_mono_fontfile() -> str:
+    candidates = [
+        "/System/Library/Fonts/Supplemental/Menlo.ttc",
+        "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "C:/Windows/Fonts/consola.ttf",
+        "C:/Windows/Fonts/cour.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return ""
+
+
+MONO_FONTFILE = detect_mono_fontfile()
+MONO_FONT_OPT = f":fontfile={MONO_FONTFILE}" if MONO_FONTFILE else FONT_OPT
+
+
 def build_overlay_filter(ov: OverlayState) -> str:
     scale = max(0.7, min(ov.overlay_scale, 2.0))
     t_font = int(17 * scale)
@@ -237,6 +256,35 @@ def build_overlay_filter(ov: OverlayState) -> str:
             f"fontcolor=#0b4fa6:fontsize={banner_font}{FONT_OPT}"
         )
 
+    return ",".join(filters)
+
+
+def build_title_card_filter(lines: list[str]) -> str:
+    clean_lines = [ffmpeg_escape_text(line) for line in lines if line and line.strip()]
+    if not clean_lines:
+        clean_lines = [ffmpeg_escape_text("Tennis Match")]
+    if len(clean_lines) > 10:
+        base_y = 598
+        step = 34
+        first_size = 38
+        other_size = 28
+    else:
+        base_y = 640
+        step = 46
+        first_size = 52
+        other_size = 34
+    filters = [
+        "scale=1920:1080:force_original_aspect_ratio=increase",
+        "crop=1920:1080",
+        "drawbox=x=90:y=560:w=1740:h=460:color=black@0.45:t=fill",
+        "drawbox=x=90:y=560:w=1740:h=460:color=white@0.35:t=2",
+    ]
+    for idx, line in enumerate(clean_lines[:14]):
+        size = first_size if idx == 0 else other_size
+        y = base_y + idx * step
+        filters.append(
+            f"drawtext=text='{line}':x=(w-text_w)/2:y={y}:fontcolor=white:fontsize={size}{MONO_FONT_OPT}"
+        )
     return ",".join(filters)
 
 
@@ -461,11 +509,20 @@ class ExportWorker(QThread):
     failed = Signal(str)
     progress = Signal(int, float, float, str)
 
-    def __init__(self, output_path: str, segments: list[Segment], include_overlay: bool) -> None:
+    def __init__(
+        self,
+        output_path: str,
+        segments: list[Segment],
+        include_overlay: bool,
+        intro_clip: dict | None = None,
+        outro_clip: dict | None = None,
+    ) -> None:
         super().__init__()
         self.output_path = output_path
         self.segments = segments
         self.include_overlay = include_overlay
+        self.intro_clip = intro_clip
+        self.outro_clip = outro_clip
         self.ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
 
     def run(self) -> None:
@@ -481,10 +538,32 @@ class ExportWorker(QThread):
                     if duration > 0.05:
                         valid_segments.append((segment, start, end, duration))
                 total_tasks = len(valid_segments)
+                if self.intro_clip:
+                    total_tasks += 1
+                if self.outro_clip:
+                    total_tasks += 1
                 if total_tasks <= 0:
                     total_tasks = 1
                 done_tasks = 0
+                source_path_for_fps = (
+                    valid_segments[0][0].source_path
+                    if valid_segments
+                    else (self.segments[0].source_path if self.segments else "")
+                )
+                target_fps = self._probe_source_fps(source_path_for_fps) or 50.0
+                target_fps_txt = f"{target_fps:.6f}".rstrip("0").rstrip(".")
                 self.progress.emit(0, 0.0, 0.0, "Preparazione export...")
+
+                if self.intro_clip:
+                    intro_chunk = os.path.join(temp_dir, "chunk_intro.mp4")
+                    self._render_title_chunk(intro_chunk, self.intro_clip, target_fps_txt)
+                    chunk_paths.append(intro_chunk)
+                    done_tasks += 1
+                    ratio = min(1.0, done_tasks / total_tasks)
+                    elapsed = max(0.0, time.monotonic() - started_at)
+                    eta = (elapsed / ratio - elapsed) if ratio > 0 else 0.0
+                    self.progress.emit(int(ratio * 90), elapsed, max(0.0, eta), "Rendering intro...")
+
                 for idx, (segment, start, _end, duration) in enumerate(valid_segments):
                     chunk_path = os.path.join(temp_dir, f"chunk_{idx:04d}.mp4")
                     cmd = [
@@ -499,7 +578,9 @@ class ExportWorker(QThread):
                     ]
 
                     if self.include_overlay:
-                        cmd += ["-vf", build_overlay_filter(segment.overlay)]
+                        cmd += ["-vf", f"{build_overlay_filter(segment.overlay)},fps={target_fps_txt}"]
+                    else:
+                        cmd += ["-vf", f"fps={target_fps_txt}"]
 
                     cmd += [
                         "-c:v",
@@ -508,8 +589,14 @@ class ExportWorker(QThread):
                         "veryfast",
                         "-crf",
                         "21",
+                        "-r",
+                        target_fps_txt,
                         "-c:a",
                         "aac",
+                        "-ar",
+                        "48000",
+                        "-ac",
+                        "2",
                         "-movflags",
                         "+faststart",
                         chunk_path,
@@ -526,6 +613,16 @@ class ExportWorker(QThread):
                         max(0.0, eta),
                         f"Rendering clip {idx + 1}/{len(valid_segments)}",
                     )
+
+                if self.outro_clip:
+                    outro_chunk = os.path.join(temp_dir, "chunk_outro.mp4")
+                    self._render_title_chunk(outro_chunk, self.outro_clip, target_fps_txt)
+                    chunk_paths.append(outro_chunk)
+                    done_tasks += 1
+                    ratio = min(1.0, done_tasks / total_tasks)
+                    elapsed = max(0.0, time.monotonic() - started_at)
+                    eta = (elapsed / ratio - elapsed) if ratio > 0 else 0.0
+                    self.progress.emit(int(ratio * 90), elapsed, max(0.0, eta), "Rendering outro...")
 
                 if not chunk_paths:
                     raise RuntimeError("Nessun segmento valido da esportare.")
@@ -552,6 +649,8 @@ class ExportWorker(QThread):
                         "veryfast",
                         "-crf",
                         "21",
+                        "-r",
+                        target_fps_txt,
                         "-c:a",
                         "aac",
                         "-movflags",
@@ -569,6 +668,117 @@ class ExportWorker(QThread):
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "Errore FFmpeg")
+
+    def _render_title_chunk(self, output_path: str, cfg: dict, target_fps_txt: str) -> None:
+        bg = cfg.get("background_path")
+        duration = float(cfg.get("duration", 5.0))
+        lines = cfg.get("lines", [])
+        if not bg or duration <= 0:
+            raise RuntimeError("Configurazione intro/outro non valida.")
+
+        vf = build_title_card_filter(lines)
+        cmd = [
+            self.ffmpeg_bin,
+            "-y",
+            "-framerate",
+            target_fps_txt,
+            "-loop",
+            "1",
+            "-i",
+            bg,
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-t",
+            f"{duration:.3f}",
+            "-vf",
+            vf,
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "21",
+            "-r",
+            target_fps_txt,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ]
+        self._run_cmd(cmd)
+
+    def _probe_source_fps(self, path: str) -> float | None:
+        if not path:
+            return None
+        candidates = [os.path.join(os.path.dirname(self.ffmpeg_bin), "ffprobe"), "ffprobe"]
+        for ffprobe_bin in candidates:
+            try:
+                res = subprocess.run(
+                    [
+                        ffprobe_bin,
+                        "-v",
+                        "error",
+                        "-select_streams",
+                        "v:0",
+                        "-show_entries",
+                        "stream=avg_frame_rate,r_frame_rate",
+                        "-of",
+                        "default=noprint_wrappers=1:nokey=1",
+                        path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode != 0:
+                    continue
+                for line in (res.stdout or "").splitlines():
+                    fps = self._parse_fps_value(line.strip())
+                    if fps and fps > 1.0:
+                        return fps
+            except Exception:  # noqa: BLE001
+                continue
+
+        # Fallback parse from ffmpeg stderr (e.g. "... 50 fps ...")
+        try:
+            res = subprocess.run([self.ffmpeg_bin, "-i", path], capture_output=True, text=True)
+            m = re.search(r"(\d+(?:\.\d+)?)\s*fps", res.stderr or "")
+            if m:
+                fps = float(m.group(1))
+                if fps > 1.0:
+                    return fps
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _parse_fps_value(self, raw: str) -> float | None:
+        if not raw:
+            return None
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            try:
+                n = float(num)
+                d = float(den)
+                if d == 0:
+                    return None
+                val = n / d
+                return val if val > 0 else None
+            except ValueError:
+                return None
+        try:
+            val = float(raw)
+            return val if val > 0 else None
+        except ValueError:
+            return None
 
 
 class ExportProgressDialog(QDialog):
@@ -596,6 +806,38 @@ class ExportProgressDialog(QDialog):
             self.eta_label.setText("Tempo stimato rimanente: 0:00")
         else:
             self.eta_label.setText(f"Tempo stimato rimanente: {format_time(eta_sec)}")
+
+
+class CollapsiblePanel(QWidget):
+    def __init__(self, title: str, expanded: bool = False, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.toggle_btn = QPushButton()
+        self.toggle_btn.setFlat(True)
+        self.toggle_btn.setStyleSheet("text-align: left; font-weight: 700;")
+        self.toggle_btn.clicked.connect(self._toggle)
+        self.content = QWidget()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self.toggle_btn)
+        layout.addWidget(self.content)
+
+        self.title = title
+        self.expanded = expanded
+        self._refresh()
+
+    def set_content_layout(self, content_layout) -> None:
+        self.content.setLayout(content_layout)
+
+    def _toggle(self) -> None:
+        self.expanded = not self.expanded
+        self._refresh()
+
+    def _refresh(self) -> None:
+        symbol = "▼" if self.expanded else "▶"
+        self.toggle_btn.setText(f"{symbol} {self.title}")
+        self.content.setVisible(self.expanded)
 
 
 class MainWindow(QMainWindow):
@@ -627,6 +869,7 @@ class MainWindow(QMainWindow):
         self.sets_a = 0
         self.sets_b = 0
         self.completed_sets: list[tuple[int, int]] = []
+        self.completed_set_tb_loser_points: list[int | None] = []
         self.in_tiebreak = False
         self.tiebreak_target = 7
         self.tiebreak_super = False
@@ -680,6 +923,9 @@ class MainWindow(QMainWindow):
         self.tournament_input = QLineEdit("Amateur Tennis Tour")
         self.player_a_input = QLineEdit("Giocatore A")
         self.player_b_input = QLineEdit("Giocatore B")
+        self.rank_a_input = QLineEdit("")
+        self.rank_b_input = QLineEdit("")
+        self.round_input = QLineEdit("Round of 32")
         self.best_of = QComboBox()
         self.best_of.addItems(["Best of 3", "Best of 5"])
         self.deciding_set_mode = QComboBox()
@@ -693,6 +939,22 @@ class MainWindow(QMainWindow):
         self.overlay_scale_combo.setCurrentText("160%")
         self.active_clip_combo = QComboBox()
         self.active_clip_combo.currentIndexChanged.connect(self.on_active_clip_changed)
+        self.enable_intro_checkbox = QCheckBox("Intro automatica")
+        self.enable_outro_checkbox = QCheckBox("Outro automatica")
+        self.use_intro_bg_for_outro = QCheckBox("Usa lo stesso frame dell'intro")
+        self.intro_duration_input = QLineEdit("5")
+        self.outro_duration_input = QLineEdit("5")
+        self.intro_bg_path: str | None = None
+        self.outro_bg_path: str | None = None
+        self.intro_bg_label = QLabel("Frame intro: non selezionato")
+        self.outro_bg_label = QLabel("Frame outro: non selezionato")
+        self.capture_intro_bg_btn = QPushButton("Cattura frame intro (dal tempo corrente)")
+        self.capture_outro_bg_btn = QPushButton("Cattura frame outro (dal tempo corrente)")
+        self.capture_intro_bg_btn.clicked.connect(self.capture_intro_background)
+        self.capture_outro_bg_btn.clicked.connect(self.capture_outro_background)
+        self.enable_intro_checkbox.stateChanged.connect(self.on_intro_toggled)
+        self.enable_outro_checkbox.stateChanged.connect(self.on_outro_toggled)
+        self.use_intro_bg_for_outro.stateChanged.connect(self.on_use_intro_bg_for_outro_toggled)
 
         self.sets_a_input = QLineEdit("0")
         self.sets_b_input = QLineEdit("0")
@@ -703,6 +965,11 @@ class MainWindow(QMainWindow):
             self.tournament_input,
             self.player_a_input,
             self.player_b_input,
+            self.rank_a_input,
+            self.rank_b_input,
+            self.round_input,
+            self.intro_duration_input,
+            self.outro_duration_input,
             self.sets_a_input,
             self.sets_b_input,
             self.games_a_input,
@@ -774,6 +1041,7 @@ class MainWindow(QMainWindow):
         self.on_overlay_scale_changed(self.overlay_scale_combo.currentText())
         self.reset_score()
         self.refresh_segments()
+        self._refresh_intro_outro_labels()
         self.video_container.clicked.connect(self.clear_edit_focus)
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setInterval(15000)
@@ -890,32 +1158,38 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.player_a_input, 1, 1)
         grid.addWidget(QLabel("Giocatore B"), 2, 0)
         grid.addWidget(self.player_b_input, 2, 1)
-        grid.addWidget(QLabel("Formato"), 3, 0)
-        grid.addWidget(self.best_of, 3, 1)
-        grid.addWidget(QLabel("Set decisivo"), 4, 0)
-        grid.addWidget(self.deciding_set_mode, 4, 1)
-        grid.addWidget(QLabel("Clip attiva"), 5, 0)
-        grid.addWidget(self.active_clip_combo, 5, 1)
-        grid.addWidget(QLabel("Servizio"), 6, 0)
-        grid.addWidget(self.server_combo, 6, 1)
-        grid.addWidget(QLabel("Posizione overlay"), 7, 0)
-        grid.addWidget(self.overlay_corner_combo, 7, 1)
-        grid.addWidget(QLabel("Scala overlay"), 8, 0)
-        grid.addWidget(self.overlay_scale_combo, 8, 1)
-        grid.addWidget(QLabel("Set A / B"), 9, 0)
+        grid.addWidget(QLabel("Ranking A"), 3, 0)
+        grid.addWidget(self.rank_a_input, 3, 1)
+        grid.addWidget(QLabel("Ranking B"), 4, 0)
+        grid.addWidget(self.rank_b_input, 4, 1)
+        grid.addWidget(QLabel("Round"), 5, 0)
+        grid.addWidget(self.round_input, 5, 1)
+        grid.addWidget(QLabel("Formato"), 6, 0)
+        grid.addWidget(self.best_of, 6, 1)
+        grid.addWidget(QLabel("Set decisivo"), 7, 0)
+        grid.addWidget(self.deciding_set_mode, 7, 1)
+        grid.addWidget(QLabel("Clip attiva"), 8, 0)
+        grid.addWidget(self.active_clip_combo, 8, 1)
+        grid.addWidget(QLabel("Servizio"), 9, 0)
+        grid.addWidget(self.server_combo, 9, 1)
+        grid.addWidget(QLabel("Posizione overlay"), 10, 0)
+        grid.addWidget(self.overlay_corner_combo, 10, 1)
+        grid.addWidget(QLabel("Scala overlay"), 11, 0)
+        grid.addWidget(self.overlay_scale_combo, 11, 1)
+        grid.addWidget(QLabel("Set A / B"), 12, 0)
         set_wrap = QHBoxLayout()
         set_wrap.addWidget(self.sets_a_input)
         set_wrap.addWidget(self.sets_b_input)
         set_widget = QWidget()
         set_widget.setLayout(set_wrap)
-        grid.addWidget(set_widget, 9, 1)
-        grid.addWidget(QLabel("Game A / B"), 10, 0)
+        grid.addWidget(set_widget, 12, 1)
+        grid.addWidget(QLabel("Game A / B"), 13, 0)
         game_wrap = QHBoxLayout()
         game_wrap.addWidget(self.games_a_input)
         game_wrap.addWidget(self.games_b_input)
         game_widget = QWidget()
         game_widget.setLayout(game_wrap)
-        grid.addWidget(game_widget, 10, 1)
+        grid.addWidget(game_widget, 13, 1)
         score_layout.addLayout(grid)
 
         point_row = QHBoxLayout()
@@ -929,6 +1203,26 @@ class MainWindow(QMainWindow):
         score_layout.addWidget(self.export_length_label)
         score_layout.addWidget(self.include_overlay)
         score_layout.addWidget(self.preview_by_timeline)
+
+        intro_outro_grid = QGridLayout()
+        intro_outro_grid.addWidget(self.enable_intro_checkbox, 0, 0, 1, 2)
+        intro_outro_grid.addWidget(QLabel("Durata intro (s)"), 1, 0)
+        intro_outro_grid.addWidget(self.intro_duration_input, 1, 1)
+        intro_outro_grid.addWidget(self.capture_intro_bg_btn, 2, 0, 1, 2)
+        intro_outro_grid.addWidget(self.intro_bg_label, 3, 0, 1, 2)
+        intro_outro_grid.addWidget(self.enable_outro_checkbox, 4, 0, 1, 2)
+        intro_outro_grid.addWidget(self.use_intro_bg_for_outro, 5, 0, 1, 2)
+        intro_outro_grid.addWidget(QLabel("Durata outro (s)"), 6, 0)
+        intro_outro_grid.addWidget(self.outro_duration_input, 6, 1)
+        intro_outro_grid.addWidget(self.capture_outro_bg_btn, 7, 0, 1, 2)
+        intro_outro_grid.addWidget(self.outro_bg_label, 8, 0, 1, 2)
+        intro_outro_container = QWidget()
+        intro_outro_container.setLayout(intro_outro_grid)
+        self.intro_outro_panel = CollapsiblePanel("Intro / Outro Automatici", expanded=False)
+        self.intro_outro_panel.set_content_layout(QVBoxLayout())
+        self.intro_outro_panel.content.layout().setContentsMargins(0, 0, 0, 0)
+        self.intro_outro_panel.content.layout().addWidget(intro_outro_container)
+        score_layout.addWidget(self.intro_outro_panel)
         right_layout.addWidget(score_panel)
 
         points_panel = QFrame()
@@ -1281,6 +1575,7 @@ class MainWindow(QMainWindow):
         if (self.sets_a, self.sets_b) != prev_sets or (self.games_a, self.games_b) != prev_games:
             # Manual override invalidates reconstructed set history.
             self.completed_sets = []
+            self.completed_set_tb_loser_points = []
         self.sets_a_input.setText(str(self.sets_a))
         self.sets_b_input.setText(str(self.sets_b))
         self.games_a_input.setText(str(self.games_a))
@@ -1366,10 +1661,13 @@ class MainWindow(QMainWindow):
         self.player.setSource(QUrl.fromLocalFile(self.input_path))
         self.pending_point_start = None
         self.pending_point_source_path = None
+        self.intro_bg_path = None
+        self.outro_bg_path = None
         self.clip_duration_cache.clear()
         self.segments.clear()
         self.undo_stack.clear()
         self.refresh_segments()
+        self._refresh_intro_outro_labels()
         if len(self.input_paths) == 1:
             self.set_status(f"Video caricato: {self.input_paths[0]}")
         else:
@@ -1393,6 +1691,189 @@ class MainWindow(QMainWindow):
             )
         else:
             self.set_status(f"Clip attiva: {os.path.basename(self.input_path)}")
+
+    def _refresh_intro_outro_labels(self) -> None:
+        intro_name = os.path.basename(self.intro_bg_path) if self.intro_bg_path else "non selezionato"
+        outro_name = os.path.basename(self.outro_bg_path) if self.outro_bg_path else "non selezionato"
+        self.intro_bg_label.setText(f"Frame intro: {intro_name}")
+        self.outro_bg_label.setText(f"Frame outro: {outro_name}")
+        self.capture_outro_bg_btn.setEnabled(not self.use_intro_bg_for_outro.isChecked())
+
+    def _capture_frame_to_path(self, target_name: str) -> str | None:
+        if not self.input_path:
+            QMessageBox.warning(self, "Errore", "Carica prima un video.")
+            return None
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        t = max(0.0, self.current_time_sec())
+        out_png = os.path.join(self.session_temp_dir.name, f"{target_name}_{time.time_ns()}.png")
+        cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-ss",
+            f"{t:.3f}",
+            "-i",
+            self.input_path,
+            "-frames:v",
+            "1",
+            out_png,
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0 or not os.path.exists(out_png):
+            QMessageBox.critical(self, "Errore", res.stderr.strip() or "Impossibile catturare il frame.")
+            return None
+        return out_png
+
+    def capture_intro_background(self) -> None:
+        frame = self._capture_frame_to_path("intro_bg")
+        if not frame:
+            return
+        self.intro_bg_path = frame
+        if self.use_intro_bg_for_outro.isChecked():
+            self.outro_bg_path = frame
+        self._refresh_intro_outro_labels()
+        self.set_status("Frame intro aggiornato.")
+
+    def capture_outro_background(self) -> None:
+        if self.use_intro_bg_for_outro.isChecked():
+            self.outro_bg_path = self.intro_bg_path
+            self._refresh_intro_outro_labels()
+            return
+        frame = self._capture_frame_to_path("outro_bg")
+        if not frame:
+            return
+        self.outro_bg_path = frame
+        self._refresh_intro_outro_labels()
+        self.set_status("Frame outro aggiornato.")
+
+    def on_intro_toggled(self, _state: int | None = None) -> None:
+        if self.enable_intro_checkbox.isChecked() and not self.intro_bg_path:
+            choice = QMessageBox.question(
+                self,
+                "Frame intro",
+                "Vuoi catturare subito il frame di background per l'intro dal tempo corrente?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if choice == QMessageBox.StandardButton.Yes:
+                self.capture_intro_background()
+        self._refresh_intro_outro_labels()
+
+    def on_outro_toggled(self, _state: int | None = None) -> None:
+        if self.enable_outro_checkbox.isChecked() and not self.use_intro_bg_for_outro.isChecked() and not self.outro_bg_path:
+            choice = QMessageBox.question(
+                self,
+                "Frame outro",
+                "Vuoi catturare subito il frame di background per l'outro dal tempo corrente?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if choice == QMessageBox.StandardButton.Yes:
+                self.capture_outro_background()
+        self._refresh_intro_outro_labels()
+
+    def on_use_intro_bg_for_outro_toggled(self, _state: int | None = None) -> None:
+        if self.use_intro_bg_for_outro.isChecked():
+            self.outro_bg_path = self.intro_bg_path
+        self._refresh_intro_outro_labels()
+
+    def _duration_from_input(self, field: QLineEdit, default: float = 5.0) -> float:
+        try:
+            value = float(field.text().strip())
+            return max(0.5, min(value, 60.0))
+        except ValueError:
+            return default
+
+    def _intro_config(self) -> dict | None:
+        if not self.enable_intro_checkbox.isChecked():
+            return None
+        if not self.intro_bg_path or not os.path.exists(self.intro_bg_path):
+            QMessageBox.warning(self, "Intro", "Seleziona un frame per l'intro.")
+            return None
+        player_a = self.player_a_input.text().strip() or "Giocatore A"
+        player_b = self.player_b_input.text().strip() or "Giocatore B"
+        rank_a = self.rank_a_input.text().strip()
+        rank_b = self.rank_b_input.text().strip()
+        round_name = self.round_input.text().strip() or "Round"
+        lines = [
+            self.tournament_input.text().strip() or "Amateur Tennis Tour",
+            round_name,
+            f"{player_a}{f' (#{rank_a})' if rank_a else ''}",
+            f"{player_b}{f' (#{rank_b})' if rank_b else ''}",
+        ]
+        return {
+            "background_path": self.intro_bg_path,
+            "duration": self._duration_from_input(self.intro_duration_input, 5.0),
+            "lines": lines,
+        }
+
+    def _superscript_digits(self, value: int) -> str:
+        mapping = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+        return str(value).translate(mapping)
+
+    def _final_score_lines(self) -> list[str]:
+        player_a = (self.player_a_input.text().strip() or "Player A")[:16]
+        player_b = (self.player_b_input.text().strip() or "Player B")[:16]
+        set_scores = list(self.completed_sets)
+        if self.games_a > 0 or self.games_b > 0:
+            set_scores.append((self.games_a, self.games_b))
+        if not set_scores:
+            set_scores = [(0, 0)]
+
+        set_cols = max(3, len(set_scores))
+        a_cells = []
+        b_cells = []
+        for idx in range(set_cols):
+            if idx < len(set_scores):
+                a_g, b_g = set_scores[idx]
+                a_txt = str(a_g)
+                b_txt = str(b_g)
+                tb_loser = self.completed_set_tb_loser_points[idx] if idx < len(self.completed_set_tb_loser_points) else None
+                if tb_loser is not None:
+                    sup = self._superscript_digits(tb_loser)
+                    if a_g > b_g:
+                        a_txt = f"{a_txt}{sup}"
+                    else:
+                        b_txt = f"{b_txt}{sup}"
+                a_cells.append(a_txt)
+                b_cells.append(b_txt)
+            else:
+                a_cells.append("")
+                b_cells.append("")
+
+        name_w = max(len(player_a), len(player_b), 12)
+        sets_w = max(len(str(self.sets_a)), len(str(self.sets_b)), 1)
+        cell_w = 4
+        row_a = f"{player_a:<{name_w}}  {self.sets_a:>{sets_w}} | " + " ".join(
+            f"{v:>{cell_w}}" for v in a_cells
+        )
+        row_b = f"{player_b:<{name_w}}  {self.sets_b:>{sets_w}} | " + " ".join(
+            f"{v:>{cell_w}}" for v in b_cells
+        )
+        lines = [
+            "FINAL RESULT",
+            row_a,
+            row_b,
+        ]
+        return lines
+
+    def _outro_config(self) -> dict | None:
+        if not self.enable_outro_checkbox.isChecked():
+            return None
+        bg = self.intro_bg_path if self.use_intro_bg_for_outro.isChecked() else self.outro_bg_path
+        if not bg or not os.path.exists(bg):
+            QMessageBox.warning(self, "Outro", "Seleziona un frame per l'outro (o usa quello dell'intro).")
+            return None
+        round_name = self.round_input.text().strip() or "Round"
+        lines = [
+            self.tournament_input.text().strip() or "Amateur Tennis Tour",
+            round_name,
+        ]
+        lines.extend(self._final_score_lines())
+        return {
+            "background_path": bg,
+            "duration": self._duration_from_input(self.outro_duration_input, 5.0),
+            "lines": lines,
+        }
 
     def _set_scale_combo_from_factor(self, factor: float) -> None:
         percent = int(round(max(0.7, min(factor, 2.0)) * 100))
@@ -1419,6 +1900,7 @@ class MainWindow(QMainWindow):
                 "sets_a": self.sets_a,
                 "sets_b": self.sets_b,
                 "completed_sets": self.completed_sets,
+                "completed_set_tb_loser_points": self.completed_set_tb_loser_points,
                 "in_tiebreak": self.in_tiebreak,
                 "tiebreak_target": self.tiebreak_target,
                 "tiebreak_super": self.tiebreak_super,
@@ -1428,6 +1910,9 @@ class MainWindow(QMainWindow):
                 "tournament": self.tournament_input.text(),
                 "player_a": self.player_a_input.text(),
                 "player_b": self.player_b_input.text(),
+                "rank_a": self.rank_a_input.text(),
+                "rank_b": self.rank_b_input.text(),
+                "round_name": self.round_input.text(),
                 "best_of_index": self.best_of.currentIndex(),
                 "deciding_set_mode_index": self.deciding_set_mode.currentIndex(),
                 "server_index": self.server_combo.currentIndex(),
@@ -1435,6 +1920,13 @@ class MainWindow(QMainWindow):
                 "overlay_scale": self.overlay_widget.scale_factor,
                 "include_overlay": self.include_overlay.isChecked(),
                 "preview_by_timeline": self.preview_by_timeline.isChecked(),
+                "enable_intro": self.enable_intro_checkbox.isChecked(),
+                "enable_outro": self.enable_outro_checkbox.isChecked(),
+                "use_intro_bg_for_outro": self.use_intro_bg_for_outro.isChecked(),
+                "intro_duration": self.intro_duration_input.text(),
+                "outro_duration": self.outro_duration_input.text(),
+                "intro_bg_path": self.intro_bg_path,
+                "outro_bg_path": self.outro_bg_path,
             },
         }
 
@@ -1541,6 +2033,20 @@ class MainWindow(QMainWindow):
                     except (TypeError, ValueError):
                         continue
         self.completed_sets = parsed_completed_sets
+        raw_tb_loser_points = state.get("completed_set_tb_loser_points", [])
+        parsed_tb_loser_points: list[int | None] = []
+        if isinstance(raw_tb_loser_points, list):
+            for item in raw_tb_loser_points:
+                if item is None:
+                    parsed_tb_loser_points.append(None)
+                else:
+                    try:
+                        parsed_tb_loser_points.append(int(item))
+                    except (TypeError, ValueError):
+                        parsed_tb_loser_points.append(None)
+        while len(parsed_tb_loser_points) < len(self.completed_sets):
+            parsed_tb_loser_points.append(None)
+        self.completed_set_tb_loser_points = parsed_tb_loser_points[: len(self.completed_sets)]
         self.in_tiebreak = bool(state.get("in_tiebreak", False))
         self.tiebreak_target = int(state.get("tiebreak_target", 7))
         self.tiebreak_super = bool(state.get("tiebreak_super", False))
@@ -1551,6 +2057,9 @@ class MainWindow(QMainWindow):
         self.tournament_input.setText(str(state.get("tournament", "Amateur Tennis Tour")))
         self.player_a_input.setText(str(state.get("player_a", "Giocatore A")))
         self.player_b_input.setText(str(state.get("player_b", "Giocatore B")))
+        self.rank_a_input.setText(str(state.get("rank_a", "")))
+        self.rank_b_input.setText(str(state.get("rank_b", "")))
+        self.round_input.setText(str(state.get("round_name", "Round of 32")))
         self.best_of.setCurrentIndex(int(state.get("best_of_index", 0)))
         self.deciding_set_mode.setCurrentIndex(int(state.get("deciding_set_mode_index", 0)))
         saved_server_idx = int(state.get("server_index", 0))
@@ -1561,6 +2070,16 @@ class MainWindow(QMainWindow):
         self._set_scale_combo_from_factor(float(state.get("overlay_scale", 1.0)))
         self.include_overlay.setChecked(bool(state.get("include_overlay", True)))
         self.preview_by_timeline.setChecked(bool(state.get("preview_by_timeline", True)))
+        self.enable_intro_checkbox.setChecked(bool(state.get("enable_intro", False)))
+        self.enable_outro_checkbox.setChecked(bool(state.get("enable_outro", False)))
+        self.use_intro_bg_for_outro.setChecked(bool(state.get("use_intro_bg_for_outro", False)))
+        self.intro_duration_input.setText(str(state.get("intro_duration", "5")))
+        self.outro_duration_input.setText(str(state.get("outro_duration", "5")))
+        intro_path = state.get("intro_bg_path")
+        outro_path = state.get("outro_bg_path")
+        self.intro_bg_path = intro_path if isinstance(intro_path, str) and os.path.exists(intro_path) else None
+        self.outro_bg_path = outro_path if isinstance(outro_path, str) and os.path.exists(outro_path) else None
+        self._refresh_intro_outro_labels()
         self.sets_a_input.setText(str(self.sets_a))
         self.sets_b_input.setText(str(self.sets_b))
         self.games_a_input.setText(str(self.games_a))
@@ -1892,6 +2411,7 @@ class MainWindow(QMainWindow):
             "sets_a": self.sets_a,
             "sets_b": self.sets_b,
             "completed_sets": list(self.completed_sets),
+            "completed_set_tb_loser_points": list(self.completed_set_tb_loser_points),
             "tb_points_a": self.tb_points_a,
             "tb_points_b": self.tb_points_b,
             "in_tiebreak": self.in_tiebreak,
@@ -1920,6 +2440,7 @@ class MainWindow(QMainWindow):
         self.sets_a = snap["sets_a"]
         self.sets_b = snap["sets_b"]
         self.completed_sets = list(snap.get("completed_sets", []))
+        self.completed_set_tb_loser_points = list(snap.get("completed_set_tb_loser_points", []))
         self.tb_points_a = snap["tb_points_a"]
         self.tb_points_b = snap["tb_points_b"]
         self.in_tiebreak = snap["in_tiebreak"]
@@ -1951,9 +2472,12 @@ class MainWindow(QMainWindow):
 
     def _award_set_from_tiebreak(self, side: str) -> None:
         if self.tiebreak_super:
-            final_games = (1, 0) if side == "A" else (0, 1)
+            final_games = (self.tb_points_a, self.tb_points_b)
+            self.completed_set_tb_loser_points.append(None)
         else:
             final_games = (7, 6) if side == "A" else (6, 7)
+            loser_tb = self.tb_points_b if side == "A" else self.tb_points_a
+            self.completed_set_tb_loser_points.append(loser_tb)
         self.completed_sets.append(final_games)
         if side == "A":
             self.sets_a += 1
@@ -1999,12 +2523,14 @@ class MainWindow(QMainWindow):
         set_ended = False
         if self.games_a >= 6 and self.games_a - self.games_b >= 2:
             self.completed_sets.append((self.games_a, self.games_b))
+            self.completed_set_tb_loser_points.append(None)
             self.sets_a += 1
             self.games_a = 0
             self.games_b = 0
             set_ended = True
         elif self.games_b >= 6 and self.games_b - self.games_a >= 2:
             self.completed_sets.append((self.games_a, self.games_b))
+            self.completed_set_tb_loser_points.append(None)
             self.sets_b += 1
             self.games_a = 0
             self.games_b = 0
@@ -2092,6 +2618,7 @@ class MainWindow(QMainWindow):
         self.tiebreak_target = 7
         self.tiebreak_super = False
         self.completed_sets = []
+        self.completed_set_tb_loser_points = []
         self.games_a = self._int_or_default(self.games_a_input.text(), 0)
         self.games_b = self._int_or_default(self.games_b_input.text(), 0)
         self.sets_a = self._int_or_default(self.sets_a_input.text(), 0)
@@ -2142,10 +2669,31 @@ class MainWindow(QMainWindow):
         self.export_progress_dialog.set_progress(0, 0.0, 0.0, "Preparazione export...")
         self.export_progress_dialog.show()
         export_segments = self._build_export_segments(source_segments)
+        intro_cfg = None
+        outro_cfg = None
+        if export_kind == "condensato":
+            intro_cfg = self._intro_config()
+            if self.enable_intro_checkbox.isChecked() and intro_cfg is None:
+                self.export_btn.setEnabled(True)
+                self.update_highlight_controls()
+                if self.export_progress_dialog is not None:
+                    self.export_progress_dialog.close()
+                    self.export_progress_dialog = None
+                return
+            outro_cfg = self._outro_config()
+            if self.enable_outro_checkbox.isChecked() and outro_cfg is None:
+                self.export_btn.setEnabled(True)
+                self.update_highlight_controls()
+                if self.export_progress_dialog is not None:
+                    self.export_progress_dialog.close()
+                    self.export_progress_dialog = None
+                return
         self.export_worker = ExportWorker(
             output_path=output_path,
             segments=export_segments,
             include_overlay=self.include_overlay.isChecked(),
+            intro_clip=intro_cfg,
+            outro_clip=outro_cfg,
         )
         self.export_worker.progress.connect(self.on_export_progress)
         self.export_worker.finished_ok.connect(self.on_export_ok)
@@ -2219,6 +2767,11 @@ class MainWindow(QMainWindow):
             self.tournament_input,
             self.player_a_input,
             self.player_b_input,
+            self.rank_a_input,
+            self.rank_b_input,
+            self.round_input,
+            self.intro_duration_input,
+            self.outro_duration_input,
             self.sets_a_input,
             self.sets_b_input,
             self.games_a_input,

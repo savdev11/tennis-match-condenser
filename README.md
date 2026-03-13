@@ -26,6 +26,8 @@ App desktop per montaggio rapido di match di tennis amatoriali.
 - Indicatore nel layout della durata stimata del video esportato.
 - Colonna destra scrollabile.
 - Pulsante `Preview grafica overlay` per esportare un frame di test con overlay reale (scala/posizione correnti).
+- Intro automatica opzionale: frame da video + card TV (torneo, round, player/ranking) con durata configurabile.
+- Outro automatica opzionale: frame da video (o stesso dell’intro) + card finale con score conclusivo.
 - Export finale MP4 con soli punti giocati, con overlay opzionale.
 
 ## Requisiti

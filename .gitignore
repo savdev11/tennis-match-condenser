@@ -27,6 +27,8 @@ dist/
 
 # App local state
 autosave_tennis_project.json
+tennis_project.json
+test.json
 *.log
 
 # Local media/exports (can be huge)
