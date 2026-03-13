@@ -6,10 +6,13 @@ import tempfile
 import json
 import time
 from dataclasses import asdict, dataclass
+import urllib.error
+import urllib.request
+import ssl
 
 import imageio_ffmpeg
 from PySide6.QtCore import QThread, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QFont, QPixmap
+from PySide6.QtGui import QKeySequence, QShortcut, QFont, QPixmap, QImage
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -38,6 +41,13 @@ from PySide6.QtWidgets import (
 )
 
 APP_VERSION = "1.5"
+OVERLAY_SCALE_PRESETS = {
+    "80%": 1.10,
+    "100%": 1.35,
+    "120%": 1.60,
+    "140%": 1.80,
+    "160%": 2.00,
+}
 
 
 @dataclass
@@ -59,6 +69,10 @@ class OverlayState:
     set_col2_a: str
     set_col2_b: str
     alert_banner: str
+    flag_a_code: str = ""
+    flag_b_code: str = ""
+    flag_a_path: str = ""
+    flag_b_path: str = ""
 
 
 @dataclass
@@ -89,8 +103,24 @@ def ffmpeg_escape_text(text: str) -> str:
     return escaped
 
 
+def ffmpeg_escape_path(path: str) -> str:
+    escaped = path.replace("\\", "\\\\")
+    escaped = escaped.replace(":", r"\:")
+    escaped = escaped.replace("'", r"\'")
+    return escaped
+
+
+def normalize_flag_code(value: str) -> str:
+    clean = re.sub(r"[^A-Za-z]", "", (value or "").strip())
+    if len(clean) < 2:
+        return ""
+    return clean[:2].upper()
+
+
 def detect_fontfile() -> str:
     candidates = [
+        "/System/Library/Fonts/HelveticaNeue.ttc",
+        "/System/Library/Fonts/Helvetica.ttc",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Supplemental/Helvetica.ttc",
@@ -131,45 +161,58 @@ MONO_FONT_OPT = f":fontfile={MONO_FONTFILE}" if MONO_FONTFILE else FONT_OPT
 
 def build_overlay_filter(ov: OverlayState) -> str:
     scale = max(0.7, min(ov.overlay_scale, 2.0))
-    t_font = int(17 * scale)
+    title_font = int(15 * scale)
     name_font = int(24 * scale)
-    num_font = int(27 * scale)
-    banner_font = int(15 * scale)
-    line_thick = max(1, int(2 * scale))
-    header_h = int(28 * scale)
-    row_h = int(42 * scale)
-    table_top = int(34 * scale)
-    col_name_w = int(328 * scale)
-    col_w = int(74 * scale)
-    # Keep overlay canvas larger than internal grid at all scales.
-    table_w = col_name_w + col_w * 3
-    box_w = max(int(560 * scale), table_w + int(20 * scale))
-    box_h = table_top + header_h + row_h * 2 + int(10 * scale)
+    num_font = int(30 * scale)
+    banner_font = int(18 * scale)
+    line_thick = max(1, int(1 * scale))
+    row_h = int(52 * scale)
+    row_gap = int(1 * scale)
+    title_h = int(28 * scale)
+    table_top = title_h
+    col_name_w = int(392 * scale)
+    col_w = int(86 * scale)
+    flag_w = int(52 * scale)
+    flag_h = row_h
+    box_w = col_name_w + col_w * 3
+    banner_h = int(34 * scale)
+    banner_gap = int(8 * scale)
+    box_h = table_top + row_h * 2 + row_gap
+    banner_extra = banner_gap + banner_h if ov.alert_banner else 0
+    total_h = box_h + banner_extra
 
     if ov.overlay_corner == "Top Right":
         base_x = f"iw-{box_w}-20"  # drawbox expression
         base_y = "20"  # drawbox expression
         text_base_x = f"w-{box_w}-20"  # drawtext expression
         text_base_y = "20"  # drawtext expression
+        ov_base_x = f"W-{box_w}-20"  # overlay filter expression
+        ov_base_y = "20"  # overlay filter expression
     elif ov.overlay_corner == "Bottom Left":
         base_x = "20"
-        base_y = f"ih-{box_h}-20"
+        base_y = f"ih-{total_h}-20"
         text_base_x = "20"
-        text_base_y = f"h-{box_h}-20"
+        text_base_y = f"h-{total_h}-20"
+        ov_base_x = "20"
+        ov_base_y = f"H-{total_h}-20"
     elif ov.overlay_corner == "Bottom Right":
         base_x = f"iw-{box_w}-20"
-        base_y = f"ih-{box_h}-20"
+        base_y = f"ih-{total_h}-20"
         text_base_x = f"w-{box_w}-20"
-        text_base_y = f"h-{box_h}-20"
+        text_base_y = f"h-{total_h}-20"
+        ov_base_x = f"W-{box_w}-20"
+        ov_base_y = f"H-{total_h}-20"
     else:
         base_x = "20"
         base_y = "20"
         text_base_x = "20"
         text_base_y = "20"
+        ov_base_x = "20"
+        ov_base_y = "20"
 
     title = ffmpeg_escape_text(ov.tournament.upper())
-    name_a = ffmpeg_escape_text((ov.player_a or "Giocatore A")[:14])
-    name_b = ffmpeg_escape_text((ov.player_b or "Giocatore B")[:14])
+    name_a = ffmpeg_escape_text((ov.player_a or "Giocatore A").upper()[:18])
+    name_b = ffmpeg_escape_text((ov.player_b or "Giocatore B").upper()[:18])
     set1_a = ffmpeg_escape_text(str(ov.set_col1_a))
     set1_b = ffmpeg_escape_text(str(ov.set_col1_b))
     set2_a = ffmpeg_escape_text(str(ov.set_col2_a))
@@ -177,113 +220,137 @@ def build_overlay_filter(ov: OverlayState) -> str:
     pts_a = ffmpeg_escape_text(str(ov.points_a))
     pts_b = ffmpeg_escape_text(str(ov.points_b))
     banner = ffmpeg_escape_text(ov.alert_banner)
-    # Parenthesize base expressions to keep ffmpeg parser happy when using arithmetic.
     bx = f"({text_base_x})"
     by = f"({text_base_y})"
     bbx = f"({base_x})"
     bby = f"({base_y})"
-    table_x0 = f"{bbx}+10"
-    table_x1 = f"{bbx}+{10 + col_name_w}"
-    table_x2 = f"{bbx}+{10 + col_name_w + col_w}"
-    table_x3 = f"{bbx}+{10 + col_name_w + col_w * 2}"
-    table_x4 = f"{bbx}+{10 + col_name_w + col_w * 3}"
-    table_text_x1 = f"{bx}+{10 + col_name_w}"
-    table_text_x2 = f"{bx}+{10 + col_name_w + col_w}"
-    table_text_x3 = f"{bx}+{10 + col_name_w + col_w * 2}"
-    table_y0 = f"{bby}+{table_top}"
-    table_y1 = f"{bby}+{table_top + header_h}"
-    table_y2 = f"{bby}+{table_top + header_h + row_h}"
-    table_y3 = f"{bby}+{table_top + header_h + row_h * 2}"
-    header_y = f"{by}+{table_top + int(5 * scale)}"
-    row_a_y = f"{by}+{table_top + header_h + int(8 * scale)}"
-    row_b_y = f"{by}+{table_top + header_h + row_h + int(8 * scale)}"
-    name_x = f"{bx}+{int(20 * scale)}"
-    set1_x = f"{table_text_x1}+{int(24 * scale)}"
-    set2_x = f"{table_text_x2}+{int(24 * scale)}"
-    pts_x = f"{table_text_x3}+{int(18 * scale)}"
-    filters = [
-        f"drawbox=x={base_x}:y={base_y}:w={box_w}:h={box_h}:color=#10263acc:t=fill",
-        f"drawbox=x={base_x}:y={base_y}:w={box_w}:h={box_h}:color=#ffffff66:t=2",
-        f"drawtext=text='{title}':x={bx}+12:y={by}+8:fontcolor=#b7e0ff:fontsize={t_font}{FONT_OPT}",
-        f"drawbox=x={table_x0}:y={table_y0}:w={col_name_w + col_w * 3}:h={line_thick}:color=#ffffff88:t=fill",
-        f"drawbox=x={table_x0}:y={table_y1}:w={col_name_w + col_w * 3}:h={line_thick}:color=#ffffff66:t=fill",
-        f"drawbox=x={table_x0}:y={table_y2}:w={col_name_w + col_w * 3}:h={line_thick}:color=#ffffff66:t=fill",
-        f"drawbox=x={table_x0}:y={table_y3}:w={col_name_w + col_w * 3}:h={line_thick}:color=#ffffff88:t=fill",
-        f"drawbox=x={table_x0}:y={table_y0}:w={line_thick}:h={header_h + row_h * 2}:color=#ffffff88:t=fill",
-        f"drawbox=x={table_x1}:y={table_y0}:w={line_thick}:h={header_h + row_h * 2}:color=#ffffff66:t=fill",
-        f"drawbox=x={table_x2}:y={table_y0}:w={line_thick}:h={header_h + row_h * 2}:color=#ffffff66:t=fill",
-        f"drawbox=x={table_x3}:y={table_y0}:w={line_thick}:h={header_h + row_h * 2}:color=#ffffff66:t=fill",
-        f"drawbox=x={table_x4}:y={table_y0}:w={line_thick}:h={header_h + row_h * 2}:color=#ffffff88:t=fill",
-        f"drawtext=text='SET 1':x={table_text_x1}+{int(8 * scale)}:y={header_y}:fontcolor=#9fd2ff:fontsize={int(15 * scale)}{FONT_OPT}",
-        f"drawtext=text='SET 2':x={table_text_x2}+{int(8 * scale)}:y={header_y}:fontcolor=#9fd2ff:fontsize={int(15 * scale)}{FONT_OPT}",
-        f"drawtext=text='PTS':x={table_text_x3}+{int(15 * scale)}:y={header_y}:fontcolor=#9fd2ff:fontsize={int(15 * scale)}{FONT_OPT}",
-        f"drawtext=text='{name_a}':x={name_x}:y={row_a_y}:fontcolor=white:fontsize={name_font}{FONT_OPT}",
-        f"drawtext=text='{name_b}':x={name_x}:y={row_b_y}:fontcolor=white:fontsize={name_font}{FONT_OPT}",
-        f"drawtext=text='{set1_a}':x={set1_x}:y={row_a_y}:fontcolor=white:fontsize={num_font}{FONT_OPT}",
-        f"drawtext=text='{set1_b}':x={set1_x}:y={row_b_y}:fontcolor=white:fontsize={num_font}{FONT_OPT}",
-        f"drawtext=text='{set2_a}':x={set2_x}:y={row_a_y}:fontcolor=white:fontsize={num_font}{FONT_OPT}",
-        f"drawtext=text='{set2_b}':x={set2_x}:y={row_b_y}:fontcolor=white:fontsize={num_font}{FONT_OPT}",
-        f"drawtext=text='{pts_a}':x={pts_x}:y={row_a_y}:fontcolor=white:fontsize={num_font}{FONT_OPT}",
-        f"drawtext=text='{pts_b}':x={pts_x}:y={row_b_y}:fontcolor=white:fontsize={num_font}{FONT_OPT}",
+    obx = f"({ov_base_x})"
+    oby = f"({ov_base_y})"
+    table_x0 = bbx
+    table_x1 = f"{bbx}+{col_name_w}"
+    table_x2 = f"{bbx}+{col_name_w + col_w}"
+    table_x3 = f"{bbx}+{col_name_w + col_w * 2}"
+    table_x4 = f"{bbx}+{col_name_w + col_w * 3}"
+    text_table_x0 = bx
+    text_table_x1 = f"{bx}+{col_name_w}"
+    text_table_x2 = f"{bx}+{col_name_w + col_w}"
+    text_table_x3 = f"{bx}+{col_name_w + col_w * 2}"
+    table_y1 = f"{bby}+{table_top}"
+    table_y2 = f"{bby}+{table_top + row_h + row_gap}"
+    text_table_y1 = f"{by}+{table_top}"
+    text_table_y2 = f"{by}+{table_top + row_h + row_gap}"
+    row_a_name_y = f"{by}+{table_top + int(14 * scale)}"
+    row_b_name_y = f"{by}+{table_top + row_h + row_gap + int(14 * scale)}"
+    row_a_num_y = f"{text_table_y1}+({row_h}-text_h)/2"
+    row_b_num_y = f"{text_table_y2}+({row_h}-text_h)/2"
+    serve_w = max(4, int(6 * scale))
+    flag_a_x = f"{obx}+{serve_w}"
+    flag_b_x = f"{obx}+{serve_w}"
+    flag_a_y = f"{oby}+{table_top + int(0 * scale)}"
+    flag_b_y = f"{oby}+{table_top + row_h + row_gap + int(0 * scale)}"
+    name_x = f"{text_table_x0}+{int(68 * scale)}"
+    set1_x = f"{text_table_x1}+({col_w}-text_w)/2"
+    set2_x = f"{text_table_x2}+({col_w}-text_w)/2"
+    pts_x = f"{text_table_x3}+({col_w}-text_w)/2"
+    base_filters = [
+        f"drawbox=x={base_x}:y={base_y}:w={box_w}:h={title_h}:color=#dfe3ea:t=fill",
+        f"drawbox=x={base_x}:y={base_y}:w={box_w}:h={title_h}:color=#d2d8e2:t=1",
+        f"drawtext=text='{title}':x={bx}+{int(10 * scale)}:y={by}+({title_h}-text_h)/2:fontcolor=#2f394a:fontsize={title_font}{FONT_OPT}",
+        f"drawbox=x={table_x0}:y={table_y1}:w={col_name_w + col_w * 3}:h={row_h}:color=#f1f1f1:t=fill",
+        f"drawbox=x={table_x0}:y={table_y2}:w={col_name_w + col_w * 3}:h={row_h}:color=#ececec:t=fill",
+        f"drawbox=x={table_x3}:y={table_y1}:w={col_w}:h={row_h}:color=#e2e6ed:t=fill",
+        f"drawbox=x={table_x3}:y={table_y2}:w={col_w}:h={row_h}:color=#e2e6ed:t=fill",
+        f"drawbox=x={table_x0}:y={table_y1}+{row_h}:w={col_name_w + col_w * 3}:h={line_thick}:color=#d7dce7:t=fill",
+        f"drawbox=x={table_x1}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#d7dce7:t=fill",
+        f"drawbox=x={table_x2}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#d7dce7:t=fill",
+        f"drawbox=x={table_x3}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#d7dce7:t=fill",
+        f"drawbox=x={table_x4}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#d7dce7:t=fill",
+        f"drawbox=x={table_x0}:y={table_y1}:w={col_name_w + col_w * 3}:h={line_thick}:color=#d7dce7:t=fill",
+        f"drawbox=x={table_x0}:y={table_y2}+{row_h}:w={col_name_w + col_w * 3}:h={line_thick}:color=#d7dce7:t=fill",
+        f"drawtext=text='{name_a}':x={name_x}:y={row_a_name_y}:fontcolor=#1f2d3d:fontsize={name_font}{FONT_OPT}",
+        f"drawtext=text='{name_b}':x={name_x}:y={row_b_name_y}:fontcolor=#1f2d3d:fontsize={name_font}{FONT_OPT}",
+        f"drawtext=text='{set1_a}':x={set1_x}:y={row_a_num_y}:fontcolor=#1b4fd8:fontsize={num_font}{FONT_OPT}",
+        f"drawtext=text='{set1_b}':x={set1_x}:y={row_b_num_y}:fontcolor=#1b4fd8:fontsize={num_font}{FONT_OPT}",
+        f"drawtext=text='{set2_a}':x={set2_x}:y={row_a_num_y}:fontcolor=#1b4fd8:fontsize={num_font}{FONT_OPT}",
+        f"drawtext=text='{set2_b}':x={set2_x}:y={row_b_num_y}:fontcolor=#1b4fd8:fontsize={num_font}{FONT_OPT}",
+        f"drawtext=text='{pts_a}':x={pts_x}:y={row_a_num_y}:fontcolor=#111111:fontsize={num_font}{FONT_OPT}",
+        f"drawtext=text='{pts_b}':x={pts_x}:y={row_b_num_y}:fontcolor=#111111:fontsize={num_font}{FONT_OPT}",
     ]
 
-    # Serve indicator: yellow left border on server row.
-    serve_x = f"{table_x0}+{int(3 * scale)}"
-    serve_w = max(4, int(6 * scale))
-    serve_h = max(24, int(28 * scale))
-    serve_a_y = f"{bby}+{table_top + header_h + int(7 * scale)}"
-    serve_b_y = f"{bby}+{table_top + header_h + row_h + int(7 * scale)}"
-    if ov.server == "A":
-        filters.append(
-            f"drawbox=x={serve_x}:y={serve_a_y}:w={serve_w}:h={serve_h}:color=#ffd76a:t=fill"
-        )
-    elif ov.server == "B":
-        filters.append(
-            f"drawbox=x={serve_x}:y={serve_b_y}:w={serve_w}:h={serve_h}:color=#ffd76a:t=fill"
-        )
-    if banner:
-        banner_w = int(220 * scale)
-        banner_h = int(26 * scale)
-        banner_x = f"{base_x}+{int(12 * scale)}"
-        banner_y = f"{base_y}+{int(2 * scale)}"
-        banner_text_x = f"{bx}+{int(12 * scale)}"
-        banner_text_y = f"{by}+{int(2 * scale)}"
-        filters.append(
-            f"drawbox=x={banner_x}:y={banner_y}:w={banner_w}:h={banner_h}:color=#ffd84a:t=fill"
-        )
-        filters.append(
-            f"drawtext=text='{banner}':x={banner_text_x}+{int(11 * scale)}:y={banner_text_y}+{int(5 * scale)}:"
-            f"fontcolor=#0b4fa6:fontsize={banner_font}{FONT_OPT}"
-        )
+    # Serve indicator (with neutral line on non-server side for symmetry).
+    serve_x = table_x0
+    serve_h = row_h
+    serve_a_y = table_y1
+    serve_b_y = table_y2
+    serve_a_color = "#2a63eb" if ov.server == "A" else "#f1f1f1"
+    serve_b_color = "#2a63eb" if ov.server == "B" else "#ececec"
+    base_filters.append(
+        f"drawbox=x={serve_x}:y={serve_a_y}:w={serve_w}:h={serve_h}:color={serve_a_color}:t=fill"
+    )
+    base_filters.append(
+        f"drawbox=x={serve_x}:y={serve_b_y}:w={serve_w}:h={serve_h}:color={serve_b_color}:t=fill"
+    )
 
-    return ",".join(filters)
+    flag_a = ov.flag_a_path if ov.flag_a_path and os.path.exists(ov.flag_a_path) else ""
+    flag_b = ov.flag_b_path if ov.flag_b_path and os.path.exists(ov.flag_b_path) else ""
+    if banner:
+        banner_w = col_name_w + col_w * 3
+        banner_x = table_x0
+        banner_y = f"{bby}+{box_h}+{banner_gap}"
+        banner_text_x = f"{text_table_x0}+({banner_w}-text_w)/2"
+        banner_text_y = f"{by}+{box_h}+{banner_gap}+({banner_h}-text_h)/2"
+        base_filters.append(
+            f"drawbox=x={banner_x}:y={banner_y}:w={banner_w}:h={banner_h}:color=#f8d24a:t=fill"
+        )
+        base_filters.append(
+            f"drawtext=text='{banner}':x={banner_text_x}:y={banner_text_y}:"
+            f"fontcolor=#173067:fontsize={banner_font}{FONT_OPT}"
+        )
+    parts = [f"[0:v]{','.join(base_filters)}[base]"]
+    current = "base"
+    if flag_a:
+        parts.append(f"movie='{ffmpeg_escape_path(flag_a)}',scale={flag_w}:{flag_h}[flagA]")
+        parts.append(f"[{current}][flagA]overlay=x={flag_a_x}:y={flag_a_y}[base1]")
+        current = "base1"
+    if flag_b:
+        parts.append(f"movie='{ffmpeg_escape_path(flag_b)}',scale={flag_w}:{flag_h}[flagB]")
+        parts.append(f"[{current}][flagB]overlay=x={flag_b_x}:y={flag_b_y}[base2]")
+        current = "base2"
+    parts.append(f"[{current}]null[out]")
+    return ";".join(parts)
 
 
 def build_title_card_filter(lines: list[str]) -> str:
     clean_lines = [ffmpeg_escape_text(line) for line in lines if line and line.strip()]
     if not clean_lines:
         clean_lines = [ffmpeg_escape_text("Tennis Match")]
-    if len(clean_lines) > 10:
-        base_y = 598
-        step = 34
-        first_size = 38
-        other_size = 28
-    else:
-        base_y = 640
-        step = 46
-        first_size = 52
-        other_size = 34
+    line_count = min(len(clean_lines), 14)
+    first_size = 50 if line_count <= 6 else 42
+    second_size = 30
+    other_size = 26
+    step = 44 if line_count <= 8 else 36
+    block_h = 210 + line_count * step
+    block_y = max(100, int((1080 - block_h) / 2))
+    text_start = block_y + 56
     filters = [
         "scale=1920:1080:force_original_aspect_ratio=increase",
         "crop=1920:1080",
-        "drawbox=x=90:y=560:w=1740:h=460:color=black@0.45:t=fill",
-        "drawbox=x=90:y=560:w=1740:h=460:color=white@0.35:t=2",
+        f"drawbox=x=90:y={block_y}:w=1740:h={block_h}:color=white@0.78:t=fill",
+        f"drawbox=x=90:y={block_y}:w=1740:h={block_h}:color=#d4dbea:t=2",
     ]
     for idx, line in enumerate(clean_lines[:14]):
-        size = first_size if idx == 0 else other_size
-        y = base_y + idx * step
+        if idx == 0:
+            size = first_size
+            color = "#1f2d3d"
+        elif idx == 1:
+            size = second_size
+            color = "#44526a"
+        else:
+            size = other_size
+            color = "#1f4fcb"
+        y = text_start + idx * step
         filters.append(
-            f"drawtext=text='{line}':x=(w-text_w)/2:y={y}:fontcolor=white:fontsize={size}{MONO_FONT_OPT}"
+            f"drawtext=text='{line}':x=(w-text_w)/2:y={y}:fontcolor={color}:fontsize={size}{FONT_OPT}"
         )
     return ",".join(filters)
 
@@ -346,36 +413,38 @@ class ScoreboardOverlayWidget(QFrame):
         self.scale_factor = 1.0
 
         self.root = QVBoxLayout(self)
-        self.root.setContentsMargins(10, 8, 10, 10)
-        self.root.setSpacing(6)
+        self.root.setContentsMargins(0, 0, 0, 0)
+        self.root.setSpacing(0)
         self.font_specs: dict[QLabel, tuple[int, int, str]] = {}
+
+        self.table_card = QFrame()
+        self.table_card.setObjectName("scoreboard_card")
+        self.card_layout = QVBoxLayout(self.table_card)
+        self.card_layout.setContentsMargins(0, 0, 0, 0)
+        self.card_layout.setSpacing(0)
 
         self.alert_label = QLabel("")
         self.alert_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._register_label(self.alert_label, 10, 800, "#0b4fa6")
+        self._register_label(self.alert_label, 10, 800, "#173067")
         self.alert_label.setVisible(False)
-        self.root.addWidget(self.alert_label)
 
         self.tournament_label = QLabel("AMATEUR TENNIS TOUR")
-        self._register_label(self.tournament_label, 11, 700, "#cbe4ff")
+        self._register_label(self.tournament_label, 13, 700, "#2f394a")
         self.root.addWidget(self.tournament_label)
+        self.root.addWidget(self.table_card)
+        self.root.addWidget(self.alert_label)
 
         self.grid = QGridLayout()
         self.grid.setHorizontalSpacing(0)
         self.grid.setVerticalSpacing(0)
-        self.root.addLayout(self.grid)
-
-        headers = ["", "SET 1", "SET 2", "PTS"]
-        for col, txt in enumerate(headers):
-            cell = QLabel(txt)
-            self._register_label(cell, 10, 700, "#9fd2ff")
-            cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.grid.addWidget(cell, 0, col)
+        self.card_layout.addLayout(self.grid)
 
         self.player_a_name = QLabel("Giocatore A")
         self.player_b_name = QLabel("Giocatore B")
-        self._register_label(self.player_a_name, 15, 700, "#f8fcff")
-        self._register_label(self.player_b_name, 15, 700, "#f8fcff")
+        self._register_label(self.player_a_name, 15, 700, "#1f2d3d")
+        self._register_label(self.player_b_name, 15, 700, "#1f2d3d")
+        self.player_a_name.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.player_b_name.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
 
         self.player_a_set1 = QLabel("0")
         self.player_b_set1 = QLabel("0")
@@ -392,38 +461,57 @@ class ScoreboardOverlayWidget(QFrame):
             self.player_b_pts,
         ]
         for label in numeric_labels:
-            self._register_label(label, 16, 800, "#ffffff")
+            self._register_label(label, 21, 800, "#1b4fd8")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.flag_a_label = QLabel("")
+        self.flag_b_label = QLabel("")
+        self.flag_a_label.setFixedSize(50, 48)
+        self.flag_b_label.setFixedSize(50, 48)
+        self.flag_a_label.setScaledContents(True)
+        self.flag_b_label.setScaledContents(True)
+        self.flag_a_label.setContentsMargins(0, 0, 0, 0)
+        self.flag_b_label.setContentsMargins(0, 0, 0, 0)
 
         self.serv_bar_a = QFrame()
         self.serv_bar_b = QFrame()
-        self.serv_bar_a.setFixedWidth(5)
-        self.serv_bar_b.setFixedWidth(5)
+        self.serv_bar_a.setFixedWidth(3)
+        self.serv_bar_b.setFixedWidth(3)
+        self.row_a = QWidget()
+        self.row_b = QWidget()
         row_a = QWidget()
         row_a_layout = QHBoxLayout(row_a)
-        row_a_layout.setContentsMargins(0, 2, 0, 2)
-        row_a_layout.setSpacing(8)
+        row_a_layout.setContentsMargins(0, 0, 0, 0)
+        row_a_layout.setSpacing(0)
+        row_a_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         row_a_layout.addWidget(self.serv_bar_a)
+        row_a_layout.addWidget(self.flag_a_label)
+        row_a_layout.addSpacing(6)
         row_a_layout.addWidget(self.player_a_name)
         row_a_layout.addStretch()
 
         row_b = QWidget()
         row_b_layout = QHBoxLayout(row_b)
-        row_b_layout.setContentsMargins(0, 2, 0, 2)
-        row_b_layout.setSpacing(8)
+        row_b_layout.setContentsMargins(0, 0, 0, 0)
+        row_b_layout.setSpacing(0)
+        row_b_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         row_b_layout.addWidget(self.serv_bar_b)
+        row_b_layout.addWidget(self.flag_b_label)
+        row_b_layout.addSpacing(6)
         row_b_layout.addWidget(self.player_b_name)
         row_b_layout.addStretch()
+        self.row_a = row_a
+        self.row_b = row_b
 
-        self.grid.addWidget(row_a, 1, 0)
-        self.grid.addWidget(self.player_a_set1, 1, 1)
-        self.grid.addWidget(self.player_a_set2, 1, 2)
-        self.grid.addWidget(self.player_a_pts, 1, 3)
+        self.grid.addWidget(row_a, 0, 0)
+        self.grid.addWidget(self.player_a_set1, 0, 1)
+        self.grid.addWidget(self.player_a_set2, 0, 2)
+        self.grid.addWidget(self.player_a_pts, 0, 3)
 
-        self.grid.addWidget(row_b, 2, 0)
-        self.grid.addWidget(self.player_b_set1, 2, 1)
-        self.grid.addWidget(self.player_b_set2, 2, 2)
-        self.grid.addWidget(self.player_b_pts, 2, 3)
+        self.grid.addWidget(row_b, 1, 0)
+        self.grid.addWidget(self.player_b_set1, 1, 1)
+        self.grid.addWidget(self.player_b_set2, 1, 2)
+        self.grid.addWidget(self.player_b_pts, 1, 3)
 
         self.apply_scale(1.0)
 
@@ -441,67 +529,173 @@ class ScoreboardOverlayWidget(QFrame):
 
     def apply_scale(self, factor: float) -> None:
         self.scale_factor = max(0.7, min(factor, 2.0))
-        margin_h = int(10 * self.scale_factor)
-        margin_v = int(8 * self.scale_factor)
-        self.root.setContentsMargins(margin_h, margin_v, margin_h, int(10 * self.scale_factor))
-        self.root.setSpacing(max(3, int(6 * self.scale_factor)))
-        line = max(1, int(1 * self.scale_factor))
+        self.card_layout.setContentsMargins(0, 0, 0, 0)
+        self.card_layout.setSpacing(0)
+        self.root.setSpacing(0)
         self.grid.setHorizontalSpacing(0)
         self.grid.setVerticalSpacing(0)
-        self.grid.setColumnMinimumWidth(0, int(320 * self.scale_factor))
-        self.grid.setColumnMinimumWidth(1, int(72 * self.scale_factor))
-        self.grid.setColumnMinimumWidth(2, int(72 * self.scale_factor))
-        self.grid.setColumnMinimumWidth(3, int(72 * self.scale_factor))
+        self.grid.setColumnMinimumWidth(0, int(370 * self.scale_factor))
+        self.grid.setColumnMinimumWidth(1, int(84 * self.scale_factor))
+        self.grid.setColumnMinimumWidth(2, int(84 * self.scale_factor))
+        self.grid.setColumnMinimumWidth(3, int(84 * self.scale_factor))
         self.grid.setColumnStretch(0, 1)
+        table_w = int((370 + 84 + 84 + 84) * self.scale_factor)
 
-        radius = int(10 * self.scale_factor)
-        serv_color = "rgba(255,215,106,255)"
-        self.serv_bar_a.setStyleSheet(f"background: {serv_color}; border-radius: 2px;")
-        self.serv_bar_b.setStyleSheet(f"background: {serv_color}; border-radius: 2px;")
-        self.serv_bar_a.setFixedWidth(max(4, int(5 * self.scale_factor)))
-        self.serv_bar_b.setFixedWidth(max(4, int(5 * self.scale_factor)))
+        radius = int(4 * self.scale_factor)
+        self.serv_bar_a.setFixedWidth(max(4, int(6 * self.scale_factor)))
+        self.serv_bar_b.setFixedWidth(max(4, int(6 * self.scale_factor)))
+        row_h_px = int(50 * self.scale_factor)
+        flag_h_px = max(20, row_h_px)
+        self.flag_a_label.setFixedSize(int(50 * self.scale_factor), flag_h_px)
+        self.flag_b_label.setFixedSize(int(50 * self.scale_factor), flag_h_px)
+        self.tournament_label.setFixedWidth(table_w)
+        self.tournament_label.setMinimumHeight(int(28 * self.scale_factor))
+        self.tournament_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.alert_label.setStyleSheet(
-            f"background: #ffd84a; border-radius: {int(6 * self.scale_factor)}px; padding: {max(2, int(3 * self.scale_factor))}px;"
-            "color: #0b4fa6; font-weight: 800;"
+            f"background: #f8d24a; border-radius: {int(2 * self.scale_factor)}px; padding: {max(4, int(6 * self.scale_factor))}px;"
+            "color: #173067; font-weight: 800;"
         )
         self.setStyleSheet(
             f"""
             #scoreboard {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(22, 30, 48, 220),
-                    stop:1 rgba(10, 86, 119, 220));
-                border: 1px solid rgba(255,255,255,80);
+                background: transparent;
+                border: none;
+            }}
+            #scoreboard_card {{
+                background: transparent;
+                border: none;
                 border-radius: {radius}px;
             }}
-            #scoreboard QLabel {{
-                padding: {max(2, int(4 * self.scale_factor))}px;
+            #scoreboard_card QLabel {{
+                padding: {max(1, int(2 * self.scale_factor))}px;
             }}
             """
         )
-        self.grid.setContentsMargins(line, line, line, line)
+        row_a_style = "background: #f1f1f1; border: 1px solid #e5e5e5;"
+        row_b_style = "background: #ececec; border: 1px solid #e5e5e5;"
+        self.row_a.setStyleSheet(row_a_style)
+        self.row_b.setStyleSheet(row_b_style)
+        self.row_a.setFixedHeight(row_h_px)
+        self.row_b.setFixedHeight(row_h_px)
+        self.player_a_pts.setMinimumHeight(row_h_px)
+        self.player_b_pts.setMinimumHeight(row_h_px)
+        self.alert_label.setFixedWidth(table_w)
+        self.alert_label.setMinimumHeight(int(30 * self.scale_factor))
+        self.grid.setRowMinimumHeight(0, 0)
+        self.grid.setContentsMargins(0, 0, 0, 0)
         for label, (base_size, weight, color) in self.font_specs.items():
-            font = QFont("Segoe UI", max(7, int(base_size * self.scale_factor)))
+            font = QFont("Helvetica Neue", max(7, int(base_size * self.scale_factor)))
             font.setWeight(self._qt_font_weight(weight))
             label.setFont(font)
             label.setStyleSheet(f"color: {color};")
+        self.player_a_name.setStyleSheet("color: #1f2d3d; padding: 0px; margin-top: 2px;")
+        self.player_b_name.setStyleSheet("color: #1f2d3d; padding: 0px; margin-top: 2px;")
+        pad = max(2, int(2 * self.scale_factor))
+        num_cell_style = f"padding: 0px; margin: 0px; border: 1px solid #d9dfe9;"
+        self.player_a_set1.setStyleSheet(f"color: #1b4fd8; {num_cell_style}")
+        self.player_b_set1.setStyleSheet(f"color: #1b4fd8; {num_cell_style}")
+        self.player_a_set2.setStyleSheet(f"color: #1b4fd8; {num_cell_style}")
+        self.player_b_set2.setStyleSheet(f"color: #1b4fd8; {num_cell_style}")
+        self.player_a_pts.setStyleSheet(f"color: #111111; background: #e2e6ed; padding: {pad}px; margin: 0px; border: 1px solid #d9dfe9;")
+        self.player_b_pts.setStyleSheet(f"color: #111111; background: #e2e6ed; padding: {pad}px; margin: 0px; border: 1px solid #d9dfe9;")
+        self.tournament_label.setStyleSheet(
+            f"background: #dfe3ea; border: 1px solid #d2d8e2; border-bottom: 0px; border-radius: 0px; "
+            f"padding-left: {int(10 * self.scale_factor)}px; color: #2f394a;"
+        )
 
-        self.setFixedWidth(int(540 * self.scale_factor))
+        self.setFixedWidth(int(690 * self.scale_factor))
         self.adjustSize()
 
     def apply_state(self, state: OverlayState) -> None:
         self.tournament_label.setText(state.tournament.upper())
-        self.player_a_name.setText(state.player_a)
-        self.player_b_name.setText(state.player_b)
+        self.player_a_name.setText(state.player_a.upper())
+        self.player_b_name.setText(state.player_b.upper())
         self.player_a_set1.setText(str(state.set_col1_a))
         self.player_b_set1.setText(str(state.set_col1_b))
         self.player_a_set2.setText(str(state.set_col2_a))
         self.player_b_set2.setText(str(state.set_col2_b))
         self.player_a_pts.setText(state.points_a)
         self.player_b_pts.setText(state.points_b)
-        self.serv_bar_a.setVisible(state.server == "A")
-        self.serv_bar_b.setVisible(state.server == "B")
+        self.serv_bar_a.setVisible(True)
+        self.serv_bar_b.setVisible(True)
+        self.serv_bar_a.setStyleSheet(
+            "background: #2a63eb; border-radius: 0px;" if state.server == "A" else "background: #f1f1f1; border-radius: 0px;"
+        )
+        self.serv_bar_b.setStyleSheet(
+            "background: #2a63eb; border-radius: 0px;" if state.server == "B" else "background: #ececec; border-radius: 0px;"
+        )
+        self.row_a.setStyleSheet("background: #f1f1f1; border: 1px solid #e5e5e5;")
+        self.row_b.setStyleSheet("background: #ececec; border: 1px solid #e5e5e5;")
         self.alert_label.setVisible(bool(state.alert_banner))
         self.alert_label.setText(state.alert_banner)
+        self._apply_flag_pixmap(self.flag_a_label, state.flag_a_path)
+        self._apply_flag_pixmap(self.flag_b_label, state.flag_b_path)
+
+    def _apply_flag_pixmap(self, target: QLabel, flag_path: str) -> None:
+        if not flag_path or not os.path.exists(flag_path):
+            target.clear()
+            target.setStyleSheet("background: #e6ebf4; border: none;")
+            return
+        pix = QPixmap(flag_path)
+        if pix.isNull():
+            target.clear()
+            target.setStyleSheet("background: #e6ebf4; border: none;")
+            return
+        target.setStyleSheet("border: none;")
+        target.setPixmap(self._center_crop_pixmap(pix, target.width(), target.height()))
+
+    def _center_crop_pixmap(self, pix: QPixmap, target_w: int, target_h: int) -> QPixmap:
+        if target_w <= 0 or target_h <= 0 or pix.isNull():
+            return pix
+        src = pix
+        # Trim transparent borders if present (some flag assets include transparent padding).
+        img = src.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        bbox = self._non_transparent_bbox(img)
+        if bbox is not None:
+            src = QPixmap.fromImage(img.copy(*bbox))
+        sw = src.width()
+        sh = src.height()
+        if sw <= 0 or sh <= 0:
+            return pix
+        target_ratio = target_w / target_h
+        src_ratio = sw / sh
+        if src_ratio > target_ratio:
+            scaled_h = target_h
+            scaled_w = int(round(scaled_h * src_ratio))
+        else:
+            scaled_w = target_w
+            scaled_h = int(round(scaled_w / src_ratio))
+        scaled = src.scaled(
+            max(1, scaled_w),
+            max(1, scaled_h),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = max(0, int((scaled.width() - target_w) / 2))
+        y = max(0, int((scaled.height() - target_h) / 2))
+        return scaled.copy(x, y, target_w, target_h)
+
+    def _non_transparent_bbox(self, image: QImage) -> tuple[int, int, int, int] | None:
+        w = image.width()
+        h = image.height()
+        min_x = w
+        min_y = h
+        max_x = -1
+        max_y = -1
+        for y in range(h):
+            for x in range(w):
+                if image.pixelColor(x, y).alpha() > 0:
+                    if x < min_x:
+                        min_x = x
+                    if y < min_y:
+                        min_y = y
+                    if x > max_x:
+                        max_x = x
+                    if y > max_y:
+                        max_y = y
+        if max_x < min_x or max_y < min_y:
+            return None
+        return (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
 
 
 class ExportWorker(QThread):
@@ -578,7 +772,15 @@ class ExportWorker(QThread):
                     ]
 
                     if self.include_overlay:
-                        cmd += ["-vf", f"{build_overlay_filter(segment.overlay)},fps={target_fps_txt}"]
+                        overlay_graph = build_overlay_filter(segment.overlay)
+                        cmd += [
+                            "-filter_complex",
+                            f"{overlay_graph};[out]fps={target_fps_txt}[outv]",
+                            "-map",
+                            "[outv]",
+                            "-map",
+                            "0:a?",
+                        ]
                     else:
                         cmd += ["-vf", f"fps={target_fps_txt}"]
 
@@ -925,6 +1127,12 @@ class MainWindow(QMainWindow):
         self.player_b_input = QLineEdit("Giocatore B")
         self.rank_a_input = QLineEdit("")
         self.rank_b_input = QLineEdit("")
+        self.flag_a_code_input = QLineEdit("IT")
+        self.flag_b_code_input = QLineEdit("ES")
+        self.flags_download_btn = QPushButton("Scarica/Aggiorna bandiere")
+        self.flags_status_label = QLabel("Bandiere: non scaricate")
+        self.flag_a_path = ""
+        self.flag_b_path = ""
         self.round_input = QLineEdit("Round of 32")
         self.best_of = QComboBox()
         self.best_of.addItems(["Best of 3", "Best of 5"])
@@ -936,7 +1144,7 @@ class MainWindow(QMainWindow):
         self.overlay_corner_combo.addItems(["Top Left", "Top Right", "Bottom Left", "Bottom Right"])
         self.overlay_scale_combo = QComboBox()
         self.overlay_scale_combo.addItems(["80%", "100%", "120%", "140%", "160%"])
-        self.overlay_scale_combo.setCurrentText("160%")
+        self.overlay_scale_combo.setCurrentText("100%")
         self.active_clip_combo = QComboBox()
         self.active_clip_combo.currentIndexChanged.connect(self.on_active_clip_changed)
         self.enable_intro_checkbox = QCheckBox("Intro automatica")
@@ -967,6 +1175,8 @@ class MainWindow(QMainWindow):
             self.player_b_input,
             self.rank_a_input,
             self.rank_b_input,
+            self.flag_a_code_input,
+            self.flag_b_code_input,
             self.round_input,
             self.intro_duration_input,
             self.outro_duration_input,
@@ -980,6 +1190,9 @@ class MainWindow(QMainWindow):
             field.editingFinished.connect(field.deselect)
         self.player_a_input.textChanged.connect(self.update_overlay)
         self.player_b_input.textChanged.connect(self.update_overlay)
+        self.flag_a_code_input.editingFinished.connect(self.on_flag_codes_changed)
+        self.flag_b_code_input.editingFinished.connect(self.on_flag_codes_changed)
+        self.flags_download_btn.clicked.connect(self.download_flags)
 
         self.server_combo.currentIndexChanged.connect(self.on_server_selection_changed)
         self.overlay_corner_combo.currentTextChanged.connect(self.on_overlay_corner_changed)
@@ -1039,6 +1252,7 @@ class MainWindow(QMainWindow):
         self._setup_hotkey_ui()
         self._bind_shortcuts()
         self.on_overlay_scale_changed(self.overlay_scale_combo.currentText())
+        self.on_flag_codes_changed()
         self.reset_score()
         self.refresh_segments()
         self._refresh_intro_outro_labels()
@@ -1055,7 +1269,7 @@ class MainWindow(QMainWindow):
         root.setStyleSheet(
             """
             QWidget {
-                font-family: "Segoe UI";
+                font-family: "Helvetica Neue";
                 font-size: 13px;
             }
             QFrame#panel {
@@ -1158,38 +1372,44 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.player_a_input, 1, 1)
         grid.addWidget(QLabel("Giocatore B"), 2, 0)
         grid.addWidget(self.player_b_input, 2, 1)
-        grid.addWidget(QLabel("Ranking A"), 3, 0)
-        grid.addWidget(self.rank_a_input, 3, 1)
-        grid.addWidget(QLabel("Ranking B"), 4, 0)
-        grid.addWidget(self.rank_b_input, 4, 1)
-        grid.addWidget(QLabel("Round"), 5, 0)
-        grid.addWidget(self.round_input, 5, 1)
-        grid.addWidget(QLabel("Formato"), 6, 0)
-        grid.addWidget(self.best_of, 6, 1)
-        grid.addWidget(QLabel("Set decisivo"), 7, 0)
-        grid.addWidget(self.deciding_set_mode, 7, 1)
-        grid.addWidget(QLabel("Clip attiva"), 8, 0)
-        grid.addWidget(self.active_clip_combo, 8, 1)
-        grid.addWidget(QLabel("Servizio"), 9, 0)
-        grid.addWidget(self.server_combo, 9, 1)
-        grid.addWidget(QLabel("Posizione overlay"), 10, 0)
-        grid.addWidget(self.overlay_corner_combo, 10, 1)
-        grid.addWidget(QLabel("Scala overlay"), 11, 0)
-        grid.addWidget(self.overlay_scale_combo, 11, 1)
-        grid.addWidget(QLabel("Set A / B"), 12, 0)
+        grid.addWidget(QLabel("Bandiera A (ISO2)"), 3, 0)
+        grid.addWidget(self.flag_a_code_input, 3, 1)
+        grid.addWidget(QLabel("Bandiera B (ISO2)"), 4, 0)
+        grid.addWidget(self.flag_b_code_input, 4, 1)
+        grid.addWidget(self.flags_download_btn, 5, 0, 1, 2)
+        grid.addWidget(self.flags_status_label, 6, 0, 1, 2)
+        grid.addWidget(QLabel("Ranking A"), 7, 0)
+        grid.addWidget(self.rank_a_input, 7, 1)
+        grid.addWidget(QLabel("Ranking B"), 8, 0)
+        grid.addWidget(self.rank_b_input, 8, 1)
+        grid.addWidget(QLabel("Round"), 9, 0)
+        grid.addWidget(self.round_input, 9, 1)
+        grid.addWidget(QLabel("Formato"), 10, 0)
+        grid.addWidget(self.best_of, 10, 1)
+        grid.addWidget(QLabel("Set decisivo"), 11, 0)
+        grid.addWidget(self.deciding_set_mode, 11, 1)
+        grid.addWidget(QLabel("Clip attiva"), 12, 0)
+        grid.addWidget(self.active_clip_combo, 12, 1)
+        grid.addWidget(QLabel("Servizio"), 13, 0)
+        grid.addWidget(self.server_combo, 13, 1)
+        grid.addWidget(QLabel("Posizione overlay"), 14, 0)
+        grid.addWidget(self.overlay_corner_combo, 14, 1)
+        grid.addWidget(QLabel("Scala overlay"), 15, 0)
+        grid.addWidget(self.overlay_scale_combo, 15, 1)
+        grid.addWidget(QLabel("Set A / B"), 16, 0)
         set_wrap = QHBoxLayout()
         set_wrap.addWidget(self.sets_a_input)
         set_wrap.addWidget(self.sets_b_input)
         set_widget = QWidget()
         set_widget.setLayout(set_wrap)
-        grid.addWidget(set_widget, 12, 1)
-        grid.addWidget(QLabel("Game A / B"), 13, 0)
+        grid.addWidget(set_widget, 16, 1)
+        grid.addWidget(QLabel("Game A / B"), 17, 0)
         game_wrap = QHBoxLayout()
         game_wrap.addWidget(self.games_a_input)
         game_wrap.addWidget(self.games_b_input)
         game_widget = QWidget()
         game_widget.setLayout(game_wrap)
-        grid.addWidget(game_widget, 13, 1)
+        grid.addWidget(game_widget, 17, 1)
         score_layout.addLayout(grid)
 
         point_row = QHBoxLayout()
@@ -1431,6 +1651,10 @@ class MainWindow(QMainWindow):
             set_col2_a=set2_a,
             set_col2_b=set2_b,
             alert_banner=self._current_alert_banner(),
+            flag_a_code=normalize_flag_code(self.flag_a_code_input.text()),
+            flag_b_code=normalize_flag_code(self.flag_b_code_input.text()),
+            flag_a_path=self.flag_a_path,
+            flag_b_path=self.flag_b_path,
         )
 
     def _server_from_combo(self) -> str:
@@ -1454,6 +1678,8 @@ class MainWindow(QMainWindow):
 
     def update_overlay(self) -> None:
         self.overlay_widget.apply_state(self.current_overlay_state())
+        # Reposition after state changes (e.g. banner shown/hidden) so bottom corners stay in-frame.
+        self.video_container.position_overlay()
         self.update_point_buttons()
         self.update_score_preview_label()
 
@@ -1535,8 +1761,10 @@ class MainWindow(QMainWindow):
                 self.input_path,
                 "-frames:v",
                 "1",
-                "-vf",
+                "-filter_complex",
                 build_overlay_filter(overlay_state),
+                "-map",
+                "[out]",
                 out_png,
             ]
             res = subprocess.run(cmd, capture_output=True, text=True)
@@ -1548,8 +1776,9 @@ class MainWindow(QMainWindow):
             dialog.setWindowTitle("Preview grafica overlay")
             dialog.setMinimumSize(900, 560)
             layout = QVBoxLayout(dialog)
+            scale_label = self.overlay_scale_combo.currentText().strip() or f"{int(overlay_state.overlay_scale * 100)}%"
             info = QLabel(
-                f"Frame a {format_time(t)} | Posizione {overlay_state.overlay_corner} | Scala {int(overlay_state.overlay_scale * 100)}%"
+                f"Frame a {format_time(t)} | Posizione {overlay_state.overlay_corner} | Scala {scale_label}"
             )
             img = QLabel()
             pix = QPixmap(out_png)
@@ -1582,17 +1811,110 @@ class MainWindow(QMainWindow):
         self.games_b_input.setText(str(self.games_b))
         self.update_overlay()
 
+    def _flags_cache_dir(self) -> str:
+        path = os.path.join(os.getcwd(), "assets", "flags_cache")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _resolve_local_flag_path(self, code: str) -> str:
+        if not code:
+            return ""
+        cached = os.path.join(self._flags_cache_dir(), f"{code.lower()}.png")
+        return cached if os.path.exists(cached) else ""
+
+    def on_flag_codes_changed(self) -> None:
+        self.flag_a_code_input.setText(normalize_flag_code(self.flag_a_code_input.text()))
+        self.flag_b_code_input.setText(normalize_flag_code(self.flag_b_code_input.text()))
+        self.flag_a_path = self._resolve_local_flag_path(self.flag_a_code_input.text())
+        self.flag_b_path = self._resolve_local_flag_path(self.flag_b_code_input.text())
+        if self.flag_a_path or self.flag_b_path:
+            self.flags_status_label.setText("Bandiere locali caricate dalla cache.")
+        else:
+            self.flags_status_label.setText("Bandiere non presenti in cache. Clicca download.")
+        self.update_overlay()
+
+    def download_flags(self) -> None:
+        code_a = normalize_flag_code(self.flag_a_code_input.text())
+        code_b = normalize_flag_code(self.flag_b_code_input.text())
+        if not code_a and not code_b:
+            QMessageBox.warning(self, "Bandiere", "Inserisci almeno un codice paese ISO2 (es. IT, ES).")
+            return
+        cache_dir = self._flags_cache_dir()
+        downloaded: list[str] = []
+        failed: list[str] = []
+        failures_detail: dict[str, str] = {}
+        ssl_ctx = ssl.create_default_context()
+        for code in [code_a, code_b]:
+            if not code:
+                continue
+            target = os.path.join(cache_dir, f"{code.lower()}.png")
+            candidates = [
+                f"https://raw.githubusercontent.com/ashleedawg/flags/master/{code}.png",
+                f"https://raw.githubusercontent.com/ashleedawg/flags/master/{code.lower()}.png",
+                f"https://raw.githubusercontent.com/ashleedawg/flags/main/{code}.png",
+                f"https://raw.githubusercontent.com/ashleedawg/flags/main/{code.lower()}.png",
+            ]
+            last_error = "not found"
+            ok = False
+            for url in candidates:
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": "tennis-match-condenser/1.5"})
+                    with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as response:
+                        payload = response.read()
+                    if not payload:
+                        raise RuntimeError("empty file")
+                    with open(target, "wb") as out:
+                        out.write(payload)
+                    downloaded.append(code)
+                    ok = True
+                    break
+                except urllib.error.HTTPError as exc:
+                    last_error = f"HTTP {exc.code}"
+                except urllib.error.URLError as exc:
+                    last_error = f"network {exc.reason}"
+                except ssl.SSLError as exc:
+                    last_error = f"ssl {exc}"
+                except (TimeoutError, OSError, RuntimeError) as exc:
+                    last_error = str(exc)
+            if not ok:
+                failed.append(code)
+                failures_detail[code] = last_error
+        self.flag_a_path = self._resolve_local_flag_path(code_a)
+        self.flag_b_path = self._resolve_local_flag_path(code_b)
+        if downloaded and not failed:
+            self.flags_status_label.setText(f"Bandiere scaricate: {', '.join(downloaded)}")
+        elif downloaded and failed:
+            self.flags_status_label.setText(
+                f"Scaricate: {', '.join(downloaded)} | Fallite: {', '.join(failed)}"
+            )
+        else:
+            detail_txt = "; ".join(f"{k} ({v})" for k, v in failures_detail.items()) or ", ".join(failed)
+            self.flags_status_label.setText(f"Download fallito per: {detail_txt}")
+            QMessageBox.warning(
+                self,
+                "Bandiere",
+                f"Download non riuscito.\nDettaglio: {detail_txt}\nVerifica connessione o codici ISO2.",
+            )
+        self.update_overlay()
+
     def on_overlay_corner_changed(self, corner: str) -> None:
         self.video_container.set_overlay_corner(corner)
 
     def on_overlay_scale_changed(self, value: str) -> None:
-        scale = value.replace("%", "").strip()
         try:
-            factor = int(scale) / 100.0
-        except ValueError:
-            factor = 1.0
-        self.overlay_widget.apply_scale(factor)
-        self.video_container.position_overlay()
+            key = str(value or "").strip()
+            factor = OVERLAY_SCALE_PRESETS.get(key)
+            if factor is None:
+                # Fallback for unexpected combo text, e.g. "100 %" or custom locale formatting.
+                digits = re.sub(r"[^0-9]", "", key)
+                factor = (int(digits) / 100.0) if digits else 1.0
+            factor = max(0.7, min(float(factor), 2.0))
+            self.overlay_widget.apply_scale(factor)
+            self.video_container.position_overlay()
+        except Exception:
+            # Never crash UI from a combo value parsing issue.
+            self.overlay_widget.apply_scale(1.0)
+            self.video_container.position_overlay()
 
     def _int_or_default(self, text: str, default: int) -> int:
         try:
@@ -1876,10 +2198,14 @@ class MainWindow(QMainWindow):
         }
 
     def _set_scale_combo_from_factor(self, factor: float) -> None:
-        percent = int(round(max(0.7, min(factor, 2.0)) * 100))
-        options = [80, 100, 120, 140, 160]
-        nearest = min(options, key=lambda v: abs(v - percent))
-        self.overlay_scale_combo.setCurrentText(f"{nearest}%")
+        clamped = max(0.7, min(factor, 2.0))
+        nearest_label = min(
+            OVERLAY_SCALE_PRESETS.keys(),
+            key=lambda label: abs(OVERLAY_SCALE_PRESETS[label] - clamped),
+        )
+        self.overlay_scale_combo.blockSignals(True)
+        self.overlay_scale_combo.setCurrentText(nearest_label)
+        self.overlay_scale_combo.blockSignals(False)
 
     def _project_payload(self) -> dict:
         current_clip_index = self.active_clip_combo.currentIndex()
@@ -1912,6 +2238,8 @@ class MainWindow(QMainWindow):
                 "player_b": self.player_b_input.text(),
                 "rank_a": self.rank_a_input.text(),
                 "rank_b": self.rank_b_input.text(),
+                "flag_a_code": self.flag_a_code_input.text(),
+                "flag_b_code": self.flag_b_code_input.text(),
                 "round_name": self.round_input.text(),
                 "best_of_index": self.best_of.currentIndex(),
                 "deciding_set_mode_index": self.deciding_set_mode.currentIndex(),
@@ -2059,6 +2387,9 @@ class MainWindow(QMainWindow):
         self.player_b_input.setText(str(state.get("player_b", "Giocatore B")))
         self.rank_a_input.setText(str(state.get("rank_a", "")))
         self.rank_b_input.setText(str(state.get("rank_b", "")))
+        self.flag_a_code_input.setText(str(state.get("flag_a_code", "IT")))
+        self.flag_b_code_input.setText(str(state.get("flag_b_code", "ES")))
+        self.on_flag_codes_changed()
         self.round_input.setText(str(state.get("round_name", "Round of 32")))
         self.best_of.setCurrentIndex(int(state.get("best_of_index", 0)))
         self.deciding_set_mode.setCurrentIndex(int(state.get("deciding_set_mode_index", 0)))
@@ -2121,6 +2452,10 @@ class MainWindow(QMainWindow):
                         set_col2_a=str(ov.get("set_col2_a", "")),
                         set_col2_b=str(ov.get("set_col2_b", "")),
                         alert_banner=str(ov.get("alert_banner", "")),
+                        flag_a_code=str(ov.get("flag_a_code", "")),
+                        flag_b_code=str(ov.get("flag_b_code", "")),
+                        flag_a_path=str(ov.get("flag_a_path", "")),
+                        flag_b_path=str(ov.get("flag_b_path", "")),
                     ),
                     is_highlight=bool(seg.get("is_highlight", False)),
                 )
@@ -2399,6 +2734,10 @@ class MainWindow(QMainWindow):
                         set_col2_a=s.overlay.set_col2_a,
                         set_col2_b=s.overlay.set_col2_b,
                         alert_banner=s.overlay.alert_banner,
+                        flag_a_code=s.overlay.flag_a_code,
+                        flag_b_code=s.overlay.flag_b_code,
+                        flag_a_path=s.overlay.flag_a_path,
+                        flag_b_path=s.overlay.flag_b_path,
                     ),
                     is_highlight=s.is_highlight,
                 )
@@ -2654,6 +2993,10 @@ class MainWindow(QMainWindow):
                         set_col2_a=seg.overlay.set_col2_a,
                         set_col2_b=seg.overlay.set_col2_b,
                         alert_banner=seg.overlay.alert_banner,
+                        flag_a_code=seg.overlay.flag_a_code,
+                        flag_b_code=seg.overlay.flag_b_code,
+                        flag_a_path=seg.overlay.flag_a_path,
+                        flag_b_path=seg.overlay.flag_b_path,
                     ),
                     is_highlight=seg.is_highlight,
                 )
@@ -2769,6 +3112,8 @@ class MainWindow(QMainWindow):
             self.player_b_input,
             self.rank_a_input,
             self.rank_b_input,
+            self.flag_a_code_input,
+            self.flag_b_code_input,
             self.round_input,
             self.intro_duration_input,
             self.outro_duration_input,
