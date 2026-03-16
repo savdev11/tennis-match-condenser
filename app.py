@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -38,9 +39,13 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QKeySequenceEdit,
+    QStackedLayout,
+    QDialogButtonBox,
 )
+from ui_shell import UIShell
+from ui_theme import apply_app_theme
 
-APP_VERSION = "1.5"
+APP_VERSION = "1.6.0"
 OVERLAY_SCALE_PRESETS = {
     "80%": 1.10,
     "100%": 1.35,
@@ -161,9 +166,9 @@ MONO_FONT_OPT = f":fontfile={MONO_FONTFILE}" if MONO_FONTFILE else FONT_OPT
 
 def build_overlay_filter(ov: OverlayState) -> str:
     scale = max(0.7, min(ov.overlay_scale, 2.0))
-    title_font = int(15 * scale)
-    name_font = int(24 * scale)
-    num_font = int(30 * scale)
+    title_font = int(14 * scale)
+    name_font = int(22 * scale)
+    num_font = int(28 * scale)
     banner_font = int(18 * scale)
     line_thick = max(1, int(1 * scale))
     row_h = int(52 * scale)
@@ -253,28 +258,27 @@ def build_overlay_filter(ov: OverlayState) -> str:
     set2_x = f"{text_table_x2}+({col_w}-text_w)/2"
     pts_x = f"{text_table_x3}+({col_w}-text_w)/2"
     base_filters = [
-        f"drawbox=x={base_x}:y={base_y}:w={box_w}:h={title_h}:color=#dfe3ea:t=fill",
-        f"drawbox=x={base_x}:y={base_y}:w={box_w}:h={title_h}:color=#d2d8e2:t=1",
-        f"drawtext=text='{title}':x={bx}+{int(10 * scale)}:y={by}+({title_h}-text_h)/2:fontcolor=#2f394a:fontsize={title_font}{FONT_OPT}",
-        f"drawbox=x={table_x0}:y={table_y1}:w={col_name_w + col_w * 3}:h={row_h}:color=#f1f1f1:t=fill",
-        f"drawbox=x={table_x0}:y={table_y2}:w={col_name_w + col_w * 3}:h={row_h}:color=#ececec:t=fill",
-        f"drawbox=x={table_x3}:y={table_y1}:w={col_w}:h={row_h}:color=#e2e6ed:t=fill",
-        f"drawbox=x={table_x3}:y={table_y2}:w={col_w}:h={row_h}:color=#e2e6ed:t=fill",
-        f"drawbox=x={table_x0}:y={table_y1}+{row_h}:w={col_name_w + col_w * 3}:h={line_thick}:color=#d7dce7:t=fill",
-        f"drawbox=x={table_x1}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#d7dce7:t=fill",
-        f"drawbox=x={table_x2}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#d7dce7:t=fill",
-        f"drawbox=x={table_x3}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#d7dce7:t=fill",
-        f"drawbox=x={table_x4}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#d7dce7:t=fill",
-        f"drawbox=x={table_x0}:y={table_y1}:w={col_name_w + col_w * 3}:h={line_thick}:color=#d7dce7:t=fill",
-        f"drawbox=x={table_x0}:y={table_y2}+{row_h}:w={col_name_w + col_w * 3}:h={line_thick}:color=#d7dce7:t=fill",
-        f"drawtext=text='{name_a}':x={name_x}:y={row_a_name_y}:fontcolor=#1f2d3d:fontsize={name_font}{FONT_OPT}",
-        f"drawtext=text='{name_b}':x={name_x}:y={row_b_name_y}:fontcolor=#1f2d3d:fontsize={name_font}{FONT_OPT}",
-        f"drawtext=text='{set1_a}':x={set1_x}:y={row_a_num_y}:fontcolor=#1b4fd8:fontsize={num_font}{FONT_OPT}",
-        f"drawtext=text='{set1_b}':x={set1_x}:y={row_b_num_y}:fontcolor=#1b4fd8:fontsize={num_font}{FONT_OPT}",
-        f"drawtext=text='{set2_a}':x={set2_x}:y={row_a_num_y}:fontcolor=#1b4fd8:fontsize={num_font}{FONT_OPT}",
-        f"drawtext=text='{set2_b}':x={set2_x}:y={row_b_num_y}:fontcolor=#1b4fd8:fontsize={num_font}{FONT_OPT}",
-        f"drawtext=text='{pts_a}':x={pts_x}:y={row_a_num_y}:fontcolor=#111111:fontsize={num_font}{FONT_OPT}",
-        f"drawtext=text='{pts_b}':x={pts_x}:y={row_b_num_y}:fontcolor=#111111:fontsize={num_font}{FONT_OPT}",
+        f"drawbox=x={base_x}:y={base_y}:w={box_w}:h={title_h}:color=#8e3f1f@0.95:t=fill",
+        f"drawbox=x={base_x}:y={base_y}:w={box_w}:h={title_h}:color=#b5542a@0.95:t=1",
+        f"drawtext=text='{title}':x={bx}+{int(10 * scale)}:y={by}+({title_h}-text_h)/2:fontcolor=#ede8e0:fontsize={title_font}{FONT_OPT}",
+        f"drawbox=x={table_x0}:y={table_y1}:w={col_name_w + col_w * 3}:h={row_h}:color=#111318@0.88:t=fill",
+        f"drawbox=x={table_x0}:y={table_y2}:w={col_name_w + col_w * 3}:h={row_h}:color=#181c22@0.88:t=fill",
+        f"drawbox=x={table_x3}:y={table_y1}:w={col_w}:h={row_h}:color=#222831@0.95:t=fill",
+        f"drawbox=x={table_x3}:y={table_y2}:w={col_w}:h={row_h}:color=#222831@0.95:t=fill",
+        f"drawbox=x={table_x0}:y={table_y1}+{row_h}:w={col_name_w + col_w * 3}:h={line_thick}:color=#2c333d:t=fill",
+        f"drawbox=x={table_x1}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#2c333d:t=fill",
+        f"drawbox=x={table_x2}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#2c333d:t=fill",
+        f"drawbox=x={table_x3}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#2c333d:t=fill",
+        f"drawbox=x={table_x4}:y={table_y1}:w={line_thick}:h={row_h * 2 + row_gap}:color=#2c333d:t=fill",
+        f"drawbox=x={table_x0}:y={table_y2}+{row_h}:w={col_name_w + col_w * 3}:h={line_thick}:color=#2c333d:t=fill",
+        f"drawtext=text='{name_a}':x={name_x}:y={row_a_name_y}:fontcolor=#ede8e0:fontsize={name_font}{FONT_OPT}",
+        f"drawtext=text='{name_b}':x={name_x}:y={row_b_name_y}:fontcolor=#ede8e0:fontsize={name_font}{FONT_OPT}",
+        f"drawtext=text='{set1_a}':x={set1_x}:y={row_a_num_y}:fontcolor=#5d86ff:fontsize={num_font}{FONT_OPT}",
+        f"drawtext=text='{set1_b}':x={set1_x}:y={row_b_num_y}:fontcolor=#5d86ff:fontsize={num_font}{FONT_OPT}",
+        f"drawtext=text='{set2_a}':x={set2_x}:y={row_a_num_y}:fontcolor=#5d86ff:fontsize={num_font}{FONT_OPT}",
+        f"drawtext=text='{set2_b}':x={set2_x}:y={row_b_num_y}:fontcolor=#5d86ff:fontsize={num_font}{FONT_OPT}",
+        f"drawtext=text='{pts_a}':x={pts_x}:y={row_a_num_y}:fontcolor=#ede8e0:fontsize={num_font}{FONT_OPT}",
+        f"drawtext=text='{pts_b}':x={pts_x}:y={row_b_num_y}:fontcolor=#ede8e0:fontsize={num_font}{FONT_OPT}",
     ]
 
     # Serve indicator (with neutral line on non-server side for symmetry).
@@ -282,8 +286,8 @@ def build_overlay_filter(ov: OverlayState) -> str:
     serve_h = row_h
     serve_a_y = table_y1
     serve_b_y = table_y2
-    serve_a_color = "#2a63eb" if ov.server == "A" else "#f1f1f1"
-    serve_b_color = "#2a63eb" if ov.server == "B" else "#ececec"
+    serve_a_color = "#d6ff3f" if ov.server == "A" else "#1d2128"
+    serve_b_color = "#d6ff3f" if ov.server == "B" else "#1d2128"
     base_filters.append(
         f"drawbox=x={serve_x}:y={serve_a_y}:w={serve_w}:h={serve_h}:color={serve_a_color}:t=fill"
     )
@@ -300,11 +304,11 @@ def build_overlay_filter(ov: OverlayState) -> str:
         banner_text_x = f"{text_table_x0}+({banner_w}-text_w)/2"
         banner_text_y = f"{by}+{box_h}+{banner_gap}+({banner_h}-text_h)/2"
         base_filters.append(
-            f"drawbox=x={banner_x}:y={banner_y}:w={banner_w}:h={banner_h}:color=#f8d24a:t=fill"
+            f"drawbox=x={banner_x}:y={banner_y}:w={banner_w}:h={banner_h}:color=#f8d24a@0.96:t=fill"
         )
         base_filters.append(
             f"drawtext=text='{banner}':x={banner_text_x}:y={banner_text_y}:"
-            f"fontcolor=#173067:fontsize={banner_font}{FONT_OPT}"
+            f"fontcolor=#1e2532:fontsize={banner_font}{FONT_OPT}"
         )
     parts = [f"[0:v]{','.join(base_filters)}[base]"]
     current = "base"
@@ -553,7 +557,7 @@ class ScoreboardOverlayWidget(QFrame):
         self.tournament_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.alert_label.setStyleSheet(
             f"background: #f8d24a; border-radius: {int(2 * self.scale_factor)}px; padding: {max(4, int(6 * self.scale_factor))}px;"
-            "color: #173067; font-weight: 800;"
+            "color: #1e2532; font-weight: 800;"
         )
         self.setStyleSheet(
             f"""
@@ -571,8 +575,8 @@ class ScoreboardOverlayWidget(QFrame):
             }}
             """
         )
-        row_a_style = "background: #f1f1f1; border: 1px solid #e5e5e5;"
-        row_b_style = "background: #ececec; border: 1px solid #e5e5e5;"
+        row_a_style = "background: rgba(17,19,24,224); border: 1px solid #2c333d;"
+        row_b_style = "background: rgba(24,28,34,224); border: 1px solid #2c333d;"
         self.row_a.setStyleSheet(row_a_style)
         self.row_b.setStyleSheet(row_b_style)
         self.row_a.setFixedHeight(row_h_px)
@@ -588,19 +592,19 @@ class ScoreboardOverlayWidget(QFrame):
             font.setWeight(self._qt_font_weight(weight))
             label.setFont(font)
             label.setStyleSheet(f"color: {color};")
-        self.player_a_name.setStyleSheet("color: #1f2d3d; padding: 0px; margin-top: 2px;")
-        self.player_b_name.setStyleSheet("color: #1f2d3d; padding: 0px; margin-top: 2px;")
+        self.player_a_name.setStyleSheet("color: #ede8e0; padding: 0px; margin-top: 2px;")
+        self.player_b_name.setStyleSheet("color: #ede8e0; padding: 0px; margin-top: 2px;")
         pad = max(2, int(2 * self.scale_factor))
-        num_cell_style = f"padding: 0px; margin: 0px; border: 1px solid #d9dfe9;"
-        self.player_a_set1.setStyleSheet(f"color: #1b4fd8; {num_cell_style}")
-        self.player_b_set1.setStyleSheet(f"color: #1b4fd8; {num_cell_style}")
-        self.player_a_set2.setStyleSheet(f"color: #1b4fd8; {num_cell_style}")
-        self.player_b_set2.setStyleSheet(f"color: #1b4fd8; {num_cell_style}")
-        self.player_a_pts.setStyleSheet(f"color: #111111; background: #e2e6ed; padding: {pad}px; margin: 0px; border: 1px solid #d9dfe9;")
-        self.player_b_pts.setStyleSheet(f"color: #111111; background: #e2e6ed; padding: {pad}px; margin: 0px; border: 1px solid #d9dfe9;")
+        num_cell_style = f"padding: 0px; margin: 0px; border: 1px solid #2c333d;"
+        self.player_a_set1.setStyleSheet(f"color: #5d86ff; {num_cell_style}")
+        self.player_b_set1.setStyleSheet(f"color: #5d86ff; {num_cell_style}")
+        self.player_a_set2.setStyleSheet(f"color: #5d86ff; {num_cell_style}")
+        self.player_b_set2.setStyleSheet(f"color: #5d86ff; {num_cell_style}")
+        self.player_a_pts.setStyleSheet(f"color: #ede8e0; background: #222831; padding: {pad}px; margin: 0px; border: 1px solid #2c333d;")
+        self.player_b_pts.setStyleSheet(f"color: #ede8e0; background: #222831; padding: {pad}px; margin: 0px; border: 1px solid #2c333d;")
         self.tournament_label.setStyleSheet(
-            f"background: #dfe3ea; border: 1px solid #d2d8e2; border-bottom: 0px; border-radius: 0px; "
-            f"padding-left: {int(10 * self.scale_factor)}px; color: #2f394a;"
+            f"background: #8e3f1f; border: 1px solid #b5542a; border-bottom: 0px; border-radius: 0px; "
+            f"padding-left: {int(10 * self.scale_factor)}px; color: #ede8e0;"
         )
 
         self.setFixedWidth(int(690 * self.scale_factor))
@@ -619,13 +623,13 @@ class ScoreboardOverlayWidget(QFrame):
         self.serv_bar_a.setVisible(True)
         self.serv_bar_b.setVisible(True)
         self.serv_bar_a.setStyleSheet(
-            "background: #2a63eb; border-radius: 0px;" if state.server == "A" else "background: #f1f1f1; border-radius: 0px;"
+            "background: #d6ff3f; border-radius: 0px;" if state.server == "A" else "background: #1d2128; border-radius: 0px;"
         )
         self.serv_bar_b.setStyleSheet(
-            "background: #2a63eb; border-radius: 0px;" if state.server == "B" else "background: #ececec; border-radius: 0px;"
+            "background: #d6ff3f; border-radius: 0px;" if state.server == "B" else "background: #1d2128; border-radius: 0px;"
         )
-        self.row_a.setStyleSheet("background: #f1f1f1; border: 1px solid #e5e5e5;")
-        self.row_b.setStyleSheet("background: #ececec; border: 1px solid #e5e5e5;")
+        self.row_a.setStyleSheet("background: rgba(17,19,24,224); border: 1px solid #2c333d;")
+        self.row_b.setStyleSheet("background: rgba(24,28,34,224); border: 1px solid #2c333d;")
         self.alert_label.setVisible(bool(state.alert_banner))
         self.alert_label.setText(state.alert_banner)
         self._apply_flag_pixmap(self.flag_a_label, state.flag_a_path)
@@ -634,12 +638,12 @@ class ScoreboardOverlayWidget(QFrame):
     def _apply_flag_pixmap(self, target: QLabel, flag_path: str) -> None:
         if not flag_path or not os.path.exists(flag_path):
             target.clear()
-            target.setStyleSheet("background: #e6ebf4; border: none;")
+            target.setStyleSheet("background: #1d2128; border: none;")
             return
         pix = QPixmap(flag_path)
         if pix.isNull():
             target.clear()
-            target.setStyleSheet("background: #e6ebf4; border: none;")
+            target.setStyleSheet("background: #1d2128; border: none;")
             return
         target.setStyleSheet("border: none;")
         target.setPixmap(self._center_crop_pixmap(pix, target.width(), target.height()))
@@ -986,28 +990,106 @@ class ExportWorker(QThread):
 class ExportProgressDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Export in corso")
+        self.setObjectName("exportProgressDialog")
+        self.setWindowTitle("Export")
         self.setModal(True)
-        self.setMinimumWidth(420)
+        self.setMinimumSize(520, 320)
+        self._last_status = ""
+        self._state = "idle"
+        self.output_path = ""
+
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
+
+        self.title_label = QLabel("Esportazione in corso")
+        self.title_label.setObjectName("dialogTitle")
+        self.mode_label = QLabel("Modalita': --")
+        self.mode_label.setObjectName("metaLabel")
         self.status_label = QLabel("Preparazione export...")
+        self.status_label.setObjectName("statusValue")
         self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("exportProgressBar")
         self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
         self.elapsed_label = QLabel("Tempo trascorso: 0:00")
+        self.elapsed_label.setObjectName("metaLabel")
         self.eta_label = QLabel("Tempo stimato rimanente: --:--")
+        self.eta_label.setObjectName("metaLabel")
+        self.summary_label = QLabel("Output: --")
+        self.summary_label.setObjectName("metaLabel")
+        self.log_label = QLabel("Dettagli")
+        self.log_label.setObjectName("sectionTitle")
+        self.log_box = QPlainTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setMaximumBlockCount(200)
+        self.log_box.setObjectName("exportLog")
+        self.close_btn = QPushButton("Chiudi")
+        self.close_btn.setObjectName("shellButton")
+        self.close_btn.setProperty("btnRole", "secondary")
+        self.close_btn.setEnabled(False)
+        self.close_btn.clicked.connect(self.accept)
+
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.mode_label)
+        layout.addWidget(self.summary_label)
         layout.addWidget(self.status_label)
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.elapsed_label)
         layout.addWidget(self.eta_label)
+        layout.addWidget(self.log_label)
+        layout.addWidget(self.log_box, 1)
+        layout.addWidget(self.close_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+    def set_mode(self, export_kind: str, output_path: str) -> None:
+        mode = "Condensato" if export_kind == "condensato" else "Highlights"
+        self.mode_label.setText(f"Modalita': {mode}")
+        self.output_path = output_path
+        self.summary_label.setText(f"Output: {output_path}")
+        self.log_box.appendPlainText(f"Avvio export {mode}")
 
     def set_progress(self, percent: int, elapsed_sec: float, eta_sec: float, status: str) -> None:
+        self._state = "progress"
+        self.close_btn.setEnabled(False)
         self.progress_bar.setValue(max(0, min(100, percent)))
         self.status_label.setText(status)
+        self.title_label.setText("Esportazione in corso")
         self.elapsed_label.setText(f"Tempo trascorso: {format_time(elapsed_sec)}")
         if eta_sec <= 0.1:
             self.eta_label.setText("Tempo stimato rimanente: 0:00")
         else:
             self.eta_label.setText(f"Tempo stimato rimanente: {format_time(eta_sec)}")
+        if status and status != self._last_status:
+            self._last_status = status
+            self.log_box.appendPlainText(f"[{percent:3d}%] {status}")
+
+    def set_success(self, export_kind: str, output_path: str, chunks: int) -> None:
+        self._state = "success"
+        mode = "condensato" if export_kind == "condensato" else "highlights"
+        self.setWindowTitle("Export completato")
+        self.title_label.setText("Export completato")
+        self.status_label.setText(f"Completato: {chunks} clip ({mode})")
+        self.progress_bar.setValue(100)
+        self.eta_label.setText("Tempo stimato rimanente: 0:00")
+        self.summary_label.setText(f"Output: {output_path}")
+        self.log_box.appendPlainText(f"Export completato: {output_path}")
+        self.close_btn.setEnabled(True)
+
+    def set_error(self, export_kind: str, message: str) -> None:
+        self._state = "error"
+        mode = "condensato" if export_kind == "condensato" else "highlights"
+        self.setWindowTitle("Export fallito")
+        self.title_label.setText("Export fallito")
+        self.status_label.setText(f"Errore durante export {mode}")
+        self.log_box.appendPlainText(message.strip() or "Errore sconosciuto")
+        self.close_btn.setEnabled(True)
+
+    def closeEvent(self, event) -> None:
+        if self._state == "progress":
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
 class CollapsiblePanel(QWidget):
@@ -1109,9 +1191,9 @@ class MainWindow(QMainWindow):
         self.save_project_btn.clicked.connect(self.save_project)
         self.open_project_btn = QPushButton("Carica progetto")
         self.open_project_btn.clicked.connect(self.load_project)
-        self.mark_start_btn = QPushButton("Inizio punto")
-        self.mark_end_btn = QPushButton("Pausa clip")
-        self.play_pause_btn = QPushButton("Play/Pausa")
+        self.mark_start_btn = QPushButton("Start Point")
+        self.mark_end_btn = QPushButton("End Point")
+        self.play_pause_btn = QPushButton("Play/Pause")
         self.mark_start_btn.clicked.connect(self.mark_start)
         self.mark_end_btn.clicked.connect(self.mark_end)
         self.play_pause_btn.clicked.connect(self.toggle_play_pause)
@@ -1198,12 +1280,12 @@ class MainWindow(QMainWindow):
         self.overlay_corner_combo.currentTextChanged.connect(self.on_overlay_corner_changed)
         self.overlay_scale_combo.currentTextChanged.connect(self.on_overlay_scale_changed)
 
-        self.point_a_btn = QPushButton("Punto A")
-        self.point_b_btn = QPushButton("Punto B")
-        self.add_last_highlight_btn = QPushButton("Aggiungi ultimo punto agli highlight")
+        self.point_a_btn = QPushButton("Point A")
+        self.point_b_btn = QPushButton("Point B")
+        self.add_last_highlight_btn = QPushButton("Highlight")
         self.add_last_highlight_btn.setEnabled(False)
         self.add_last_highlight_btn.clicked.connect(self.add_last_point_to_highlights)
-        self.reset_score_btn = QPushButton("Reset score")
+        self.reset_score_btn = QPushButton("Reset Score")
         self.point_a_btn.clicked.connect(lambda: self.tennis_point_winner("A"))
         self.point_b_btn.clicked.connect(lambda: self.tennis_point_winner("B"))
         self.reset_score_btn.clicked.connect(self.reset_score)
@@ -1219,7 +1301,7 @@ class MainWindow(QMainWindow):
         self.remove_highlight_btn = QPushButton("Rimuovi highlight selezionato")
         self.remove_highlight_btn.setEnabled(False)
         self.remove_highlight_btn.clicked.connect(self.remove_selected_highlight)
-        self.clear_segments_btn = QPushButton("Svuota")
+        self.clear_segments_btn = QPushButton("Svuota clip")
         self.clear_segments_btn.clicked.connect(self.clear_segments)
         self.undo_btn = QPushButton("Undo")
         self.undo_btn.clicked.connect(self.undo_last_action)
@@ -1264,235 +1346,575 @@ class MainWindow(QMainWindow):
         self.try_restore_autosave()
 
     def _build_ui(self) -> None:
-        root = QWidget()
-        self.setCentralWidget(root)
-        root.setStyleSheet(
-            """
-            QWidget {
-                font-family: "Helvetica Neue";
-                font-size: 13px;
-            }
-            QFrame#panel {
-                border: 1px solid #4f5661;
-                border-radius: 10px;
-                background: #ffffff;
-            }
-            QSplitter::handle {
-                background: #6b7280;
-                border: 1px solid #3f4651;
-                border-radius: 4px;
-            }
-            QSplitter::handle:hover {
-                background: #545b68;
-            }
-            QSplitter::handle:pressed {
-                background: #3f4651;
-            }
-            """
-        )
+        self.ui_shell = UIShell(self)
+        self.setCentralWidget(self.ui_shell)
+        apply_app_theme(self)
 
-        main_layout = QVBoxLayout(root)
-        top = QHBoxLayout()
-        top.addWidget(QLabel("<h2>Tennis Match Condenser</h2>"))
-        top.addStretch()
-        top.addWidget(self.open_project_btn)
-        top.addWidget(self.save_project_btn)
-        top.addWidget(self.load_btn)
-        main_layout.addLayout(top)
+        # Keep the legacy status field target so controller methods remain unchanged.
+        self.status_label = self.ui_shell.project_status_label
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(16)
-        main_layout.addWidget(splitter, 1)
+        # Center stage with polished empty-state overlay.
+        self.video_stage_host = QWidget()
+        self.video_stage_stack = QStackedLayout(self.video_stage_host)
+        self.video_stage_stack.setContentsMargins(0, 0, 0, 0)
+        self.video_stage_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
 
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_splitter = QSplitter(Qt.Orientation.Vertical)
-        left_splitter.setChildrenCollapsible(False)
-        left_splitter.setHandleWidth(16)
-        left_layout.addWidget(left_splitter, 1)
+        self.video_stage_stack.addWidget(self.video_container)
+        empty_state = QFrame()
+        empty_state.setObjectName("emptyStateCard")
+        empty_state_layout = QVBoxLayout(empty_state)
+        empty_state_layout.setContentsMargins(24, 24, 24, 24)
+        empty_state_layout.setSpacing(8)
+        self.empty_state_title = QLabel("No Video Loaded")
+        self.empty_state_title.setObjectName("emptyStateTitle")
+        self.empty_state_hint = QLabel("Load a single video or a split sequence to start editing.")
+        self.empty_state_hint.setObjectName("metaLabel")
+        self.empty_state_load_btn = QPushButton("Carica Video")
+        self.empty_state_load_btn.setProperty("btnRole", "primary")
+        self.empty_state_load_btn.clicked.connect(self.load_videos)
+        empty_state_layout.addStretch(1)
+        empty_state_layout.addWidget(self.empty_state_title, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_state_layout.addWidget(self.empty_state_hint, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_state_layout.addWidget(self.empty_state_load_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_state_layout.addStretch(1)
+        self.video_stage_stack.addWidget(empty_state)
+        self.ui_shell.center_video_layout.addWidget(self.video_stage_host, 1)
 
-        video_area = QWidget()
-        video_area_layout = QVBoxLayout(video_area)
-        video_area_layout.setContentsMargins(0, 0, 0, 0)
-        video_area_layout.setSpacing(6)
-        video_area_layout.addWidget(self.video_container, 1)
-
-        timeline_row = QHBoxLayout()
-        timeline_row.setContentsMargins(0, 0, 0, 0)
-        timeline_row.addWidget(self.timeline_slider, 1)
-        timeline_row.addWidget(self.time_label)
-        video_area_layout.addLayout(timeline_row)
-
-        controls_area = QWidget()
-        controls_layout = QVBoxLayout(controls_area)
+        controls_host = QWidget()
+        controls_layout = QVBoxLayout(controls_host)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(6)
 
-        jumps = QHBoxLayout()
+        timeline_row = QHBoxLayout()
+        timeline_row.setContentsMargins(0, 0, 0, 0)
+        timeline_row.setSpacing(8)
+        timeline_row.addWidget(self.timeline_slider, 1)
+        timeline_row.addWidget(self.time_label)
+        controls_layout.addLayout(timeline_row)
+
+        transport_row = QHBoxLayout()
+        transport_row.setContentsMargins(0, 0, 0, 0)
+        transport_row.setSpacing(6)
+
+        self.transport_status_chip = QLabel("Idle")
+        self.transport_status_chip.setObjectName("statusChip")
+
+        playback_group = QWidget()
+        playback_layout = QHBoxLayout(playback_group)
+        playback_layout.setContentsMargins(6, 4, 6, 4)
+        playback_layout.setSpacing(6)
+        playback_group.setObjectName("transportGroup")
+        playback_layout.addWidget(self.play_pause_btn)
+
+        seek_group = QWidget()
+        seek_layout = QHBoxLayout(seek_group)
+        seek_layout.setContentsMargins(6, 4, 6, 4)
+        seek_layout.setSpacing(4)
+        seek_group.setObjectName("transportGroup")
         for btn in self.jump_buttons:
-            jumps.addWidget(btn)
-        controls_layout.addLayout(jumps)
+            seek_layout.addWidget(btn)
 
-        marks = QHBoxLayout()
-        marks.addWidget(self.mark_start_btn)
-        marks.addWidget(self.mark_end_btn)
-        marks.addWidget(self.play_pause_btn)
-        controls_layout.addLayout(marks)
-        controls_layout.addWidget(self.status_label)
-        controls_layout.addStretch()
+        capture_group = QWidget()
+        capture_layout = QHBoxLayout(capture_group)
+        capture_layout.setContentsMargins(6, 4, 6, 4)
+        capture_layout.setSpacing(6)
+        capture_group.setObjectName("transportGroup")
+        capture_layout.addWidget(self.mark_start_btn)
+        capture_layout.addWidget(self.mark_end_btn)
 
-        left_splitter.addWidget(video_area)
-        left_splitter.addWidget(controls_area)
-        left_splitter.setSizes([620, 170])
-        left_splitter.setStretchFactor(0, 5)
-        left_splitter.setStretchFactor(1, 1)
-        splitter.addWidget(left)
+        scoring_group = QWidget()
+        scoring_layout = QHBoxLayout(scoring_group)
+        scoring_layout.setContentsMargins(6, 4, 6, 4)
+        scoring_layout.setSpacing(6)
+        scoring_group.setObjectName("transportGroup")
+        scoring_layout.addWidget(self.point_a_btn)
+        scoring_layout.addWidget(self.point_b_btn)
+        scoring_layout.addWidget(self.add_last_highlight_btn)
 
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_scroll.setWidget(right)
-        splitter.addWidget(right_scroll)
-        splitter.setSizes([980, 380])
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 2)
+        transport_row.addWidget(playback_group)
+        transport_row.addWidget(seek_group)
+        transport_row.addWidget(capture_group)
+        transport_row.addWidget(scoring_group)
+        transport_row.addStretch(1)
+        transport_row.addWidget(self.transport_status_chip)
+        controls_layout.addLayout(transport_row)
+        self.ui_shell.center_timeline_layout.addWidget(controls_host)
 
-        score_panel = QFrame()
-        score_panel.setObjectName("panel")
-        score_layout = QVBoxLayout(score_panel)
-        score_layout.addWidget(QLabel("<b>Scoreboard overlay</b>"))
+        # Left rail placeholders (source / clips / highlights).
+        source_panel = QFrame()
+        source_panel.setObjectName("panel")
+        source_controls_layout = QVBoxLayout(source_panel)
+        source_controls_layout.setContentsMargins(8, 8, 8, 8)
+        source_controls_layout.setSpacing(8)
+        source_title = QLabel("Active Source")
+        source_title.setObjectName("sectionTitle")
+        source_controls_layout.addWidget(source_title)
+        source_controls_layout.addWidget(self.active_clip_combo)
+        self.source_empty_label = QLabel("Nessun video caricato")
+        self.source_empty_label.setObjectName("metaLabel")
+        source_controls_layout.addWidget(self.source_empty_label)
+        self.ui_shell.left_sources_page.layout().addWidget(source_panel, 0)
+        self.ui_shell.left_sources_page.layout().addStretch(1)
 
-        grid = QGridLayout()
-        grid.addWidget(QLabel("Torneo"), 0, 0)
-        grid.addWidget(self.tournament_input, 0, 1)
-        grid.addWidget(QLabel("Giocatore A"), 1, 0)
-        grid.addWidget(self.player_a_input, 1, 1)
-        grid.addWidget(QLabel("Giocatore B"), 2, 0)
-        grid.addWidget(self.player_b_input, 2, 1)
-        grid.addWidget(QLabel("Bandiera A (ISO2)"), 3, 0)
-        grid.addWidget(self.flag_a_code_input, 3, 1)
-        grid.addWidget(QLabel("Bandiera B (ISO2)"), 4, 0)
-        grid.addWidget(self.flag_b_code_input, 4, 1)
-        grid.addWidget(self.flags_download_btn, 5, 0, 1, 2)
-        grid.addWidget(self.flags_status_label, 6, 0, 1, 2)
-        grid.addWidget(QLabel("Ranking A"), 7, 0)
-        grid.addWidget(self.rank_a_input, 7, 1)
-        grid.addWidget(QLabel("Ranking B"), 8, 0)
-        grid.addWidget(self.rank_b_input, 8, 1)
-        grid.addWidget(QLabel("Round"), 9, 0)
-        grid.addWidget(self.round_input, 9, 1)
-        grid.addWidget(QLabel("Formato"), 10, 0)
-        grid.addWidget(self.best_of, 10, 1)
-        grid.addWidget(QLabel("Set decisivo"), 11, 0)
-        grid.addWidget(self.deciding_set_mode, 11, 1)
-        grid.addWidget(QLabel("Clip attiva"), 12, 0)
-        grid.addWidget(self.active_clip_combo, 12, 1)
-        grid.addWidget(QLabel("Servizio"), 13, 0)
-        grid.addWidget(self.server_combo, 13, 1)
-        grid.addWidget(QLabel("Posizione overlay"), 14, 0)
-        grid.addWidget(self.overlay_corner_combo, 14, 1)
-        grid.addWidget(QLabel("Scala overlay"), 15, 0)
-        grid.addWidget(self.overlay_scale_combo, 15, 1)
-        grid.addWidget(QLabel("Set A / B"), 16, 0)
+        clips_panel = QFrame()
+        clips_panel.setObjectName("panel")
+        clips_layout = QVBoxLayout(clips_panel)
+        clips_layout.setContentsMargins(8, 8, 8, 8)
+        clips_layout.setSpacing(8)
+        self.segments_list.setObjectName("segmentsList")
+        self.segments_list.setWordWrap(True)
+        self.segments_list.setAlternatingRowColors(True)
+        clips_layout.addWidget(self.segments_list, 1)
+        self.segments_empty_label = QLabel("Nessun punto selezionato")
+        self.segments_empty_label.setObjectName("metaLabel")
+        clips_layout.addWidget(self.segments_empty_label)
+        clips_btns = QHBoxLayout()
+        clips_btns.setSpacing(6)
+        clips_btns.addWidget(self.undo_btn)
+        clips_btns.addWidget(self.clear_segments_btn)
+        clips_layout.addLayout(clips_btns)
+        self.ui_shell.left_clips_page.layout().addWidget(clips_panel, 1)
+
+        highlights_panel = QFrame()
+        highlights_panel.setObjectName("panel")
+        highlights_layout = QVBoxLayout(highlights_panel)
+        highlights_layout.setContentsMargins(8, 8, 8, 8)
+        highlights_layout.setSpacing(8)
+        self.highlights_list.setObjectName("highlightsList")
+        self.highlights_list.setWordWrap(True)
+        self.highlights_list.setAlternatingRowColors(True)
+        highlights_layout.addWidget(self.highlights_list, 1)
+        self.highlights_empty_label = QLabel("Nessun highlight")
+        self.highlights_empty_label.setObjectName("metaLabel")
+        highlights_layout.addWidget(self.highlights_empty_label)
+        highlights_btns = QHBoxLayout()
+        highlights_btns.setSpacing(6)
+        highlights_btns.addWidget(self.remove_highlight_btn)
+        highlights_btns.addWidget(self.export_highlights_btn)
+        highlights_layout.addLayout(highlights_btns)
+        self.ui_shell.left_highlights_page.layout().addWidget(highlights_panel, 1)
+
+        # Right inspector tabs.
+        score_tab = self.ui_shell.right_score_page.layout()
+        score_tab.setSpacing(8)
+
+        live_card = QFrame()
+        live_card.setObjectName("inspectorCard")
+        live_layout = QVBoxLayout(live_card)
+        live_layout.setContentsMargins(10, 10, 10, 10)
+        live_layout.setSpacing(8)
+        live_title = QLabel("Live Score / Inspector")
+        live_title.setObjectName("sectionTitle")
+        live_layout.addWidget(live_title)
+
+        self.score_summary_card = QLabel("A 0-0 0 | B 0-0 0")
+        self.score_summary_card.setObjectName("summaryCard")
+        live_layout.addWidget(self.score_summary_card)
+
+        chips_row = QHBoxLayout()
+        chips_row.setContentsMargins(0, 0, 0, 0)
+        chips_row.setSpacing(6)
+        self.server_status_chip = QLabel("Server: A")
+        self.server_status_chip.setObjectName("statusChip")
+        self.point_open_chip = QLabel("Idle")
+        self.point_open_chip.setObjectName("statusChip")
+        chips_row.addWidget(self.server_status_chip)
+        chips_row.addWidget(self.point_open_chip)
+        chips_row.addStretch(1)
+        live_layout.addLayout(chips_row)
+
+        self.quick_undo_btn = QPushButton("Undo ultimo punto")
+        self.quick_undo_btn.setProperty("btnRole", "subtle")
+        self.quick_undo_btn.clicked.connect(self.undo_last_action)
+        quick_row_2 = QHBoxLayout()
+        quick_row_2.setContentsMargins(0, 0, 0, 0)
+        quick_row_2.setSpacing(6)
+        quick_row_2.addWidget(self.quick_undo_btn)
+        self.reset_score_btn.setProperty("btnRole", "danger")
+        quick_row_2.addWidget(self.reset_score_btn)
+        live_layout.addLayout(quick_row_2)
+
+        live_layout.addWidget(self.score_preview_label)
+        score_tab.addWidget(live_card)
+
+        players_card = QFrame()
+        players_card.setObjectName("inspectorCard")
+        players_layout = QVBoxLayout(players_card)
+        players_layout.setContentsMargins(10, 10, 10, 10)
+        players_layout.setSpacing(8)
+        players_title = QLabel("Players")
+        players_title.setObjectName("sectionTitle")
+        players_layout.addWidget(players_title)
+        players_grid = QGridLayout()
+        players_grid.setHorizontalSpacing(8)
+        players_grid.setVerticalSpacing(8)
+        players_grid.addWidget(QLabel("Nome A"), 0, 0)
+        players_grid.addWidget(self.player_a_input, 0, 1)
+        players_grid.addWidget(QLabel("Nome B"), 0, 2)
+        players_grid.addWidget(self.player_b_input, 0, 3)
+        players_grid.addWidget(QLabel("Flag A"), 1, 0)
+        players_grid.addWidget(self.flag_a_code_input, 1, 1)
+        players_grid.addWidget(QLabel("Flag B"), 1, 2)
+        players_grid.addWidget(self.flag_b_code_input, 1, 3)
+        players_grid.addWidget(QLabel("Ranking A"), 2, 0)
+        players_grid.addWidget(self.rank_a_input, 2, 1)
+        players_grid.addWidget(QLabel("Ranking B"), 2, 2)
+        players_grid.addWidget(self.rank_b_input, 2, 3)
+        players_grid.setColumnStretch(1, 1)
+        players_grid.setColumnStretch(3, 1)
+        players_layout.addLayout(players_grid)
+        players_layout.addWidget(self.flags_download_btn)
+        players_layout.addWidget(self.flags_status_label)
+        score_tab.addWidget(players_card)
+
+        match_card = QFrame()
+        match_card.setObjectName("inspectorCard")
+        match_layout = QVBoxLayout(match_card)
+        match_layout.setContentsMargins(10, 10, 10, 10)
+        match_layout.setSpacing(8)
+        match_title = QLabel("Match Info")
+        match_title.setObjectName("sectionTitle")
+        match_layout.addWidget(match_title)
+        match_grid = QGridLayout()
+        match_grid.setHorizontalSpacing(10)
+        match_grid.setVerticalSpacing(8)
+        match_grid.setColumnStretch(1, 1)
+        match_grid.addWidget(QLabel("Torneo"), 0, 0)
+        match_grid.addWidget(self.tournament_input, 0, 1)
+        match_grid.addWidget(QLabel("Round"), 1, 0)
+        match_grid.addWidget(self.round_input, 1, 1)
+        match_grid.addWidget(QLabel("Formato"), 2, 0)
+        match_grid.addWidget(self.best_of, 2, 1)
+        match_grid.addWidget(QLabel("Set decisivo"), 3, 0)
+        match_grid.addWidget(self.deciding_set_mode, 3, 1)
+        match_grid.addWidget(QLabel("Servizio"), 4, 0)
+        match_grid.addWidget(self.server_combo, 4, 1)
+        match_grid.addWidget(QLabel("Posizione overlay"), 5, 0)
+        match_grid.addWidget(self.overlay_corner_combo, 5, 1)
+        match_grid.addWidget(QLabel("Scala overlay"), 6, 0)
+        match_grid.addWidget(self.overlay_scale_combo, 6, 1)
+        match_grid.addWidget(QLabel("Set A / B"), 7, 0)
         set_wrap = QHBoxLayout()
+        set_wrap.setContentsMargins(0, 0, 0, 0)
+        set_wrap.setSpacing(6)
         set_wrap.addWidget(self.sets_a_input)
         set_wrap.addWidget(self.sets_b_input)
         set_widget = QWidget()
         set_widget.setLayout(set_wrap)
-        grid.addWidget(set_widget, 16, 1)
-        grid.addWidget(QLabel("Game A / B"), 17, 0)
+        match_grid.addWidget(set_widget, 7, 1)
+        match_grid.addWidget(QLabel("Game A / B"), 8, 0)
         game_wrap = QHBoxLayout()
+        game_wrap.setContentsMargins(0, 0, 0, 0)
+        game_wrap.setSpacing(6)
         game_wrap.addWidget(self.games_a_input)
         game_wrap.addWidget(self.games_b_input)
         game_widget = QWidget()
         game_widget.setLayout(game_wrap)
-        grid.addWidget(game_widget, 17, 1)
-        score_layout.addLayout(grid)
+        match_grid.addWidget(game_widget, 8, 1)
+        match_layout.addLayout(match_grid)
+        score_tab.addWidget(match_card)
 
-        point_row = QHBoxLayout()
-        point_row.addWidget(self.point_a_btn)
-        point_row.addWidget(self.point_b_btn)
-        point_row.addWidget(self.reset_score_btn)
-        score_layout.addLayout(point_row)
-        score_layout.addWidget(self.add_last_highlight_btn)
-        score_layout.addWidget(self.preview_overlay_btn)
-        score_layout.addWidget(self.score_preview_label)
-        score_layout.addWidget(self.export_length_label)
-        score_layout.addWidget(self.include_overlay)
-        score_layout.addWidget(self.preview_by_timeline)
+        overlay_card = QFrame()
+        overlay_card.setObjectName("inspectorCard")
+        overlay_layout = QVBoxLayout(overlay_card)
+        overlay_layout.setContentsMargins(10, 10, 10, 10)
+        overlay_layout.setSpacing(8)
+        overlay_title = QLabel("Overlay / Preview")
+        overlay_title.setObjectName("sectionTitle")
+        overlay_layout.addWidget(overlay_title)
+        overlay_layout.addWidget(self.preview_overlay_btn)
+        overlay_layout.addWidget(self.preview_by_timeline)
+        overlay_layout.addWidget(self.include_overlay)
+        score_tab.addWidget(overlay_card)
+        score_tab.addStretch(1)
 
-        intro_outro_grid = QGridLayout()
-        intro_outro_grid.addWidget(self.enable_intro_checkbox, 0, 0, 1, 2)
-        intro_outro_grid.addWidget(QLabel("Durata intro (s)"), 1, 0)
-        intro_outro_grid.addWidget(self.intro_duration_input, 1, 1)
-        intro_outro_grid.addWidget(self.capture_intro_bg_btn, 2, 0, 1, 2)
-        intro_outro_grid.addWidget(self.intro_bg_label, 3, 0, 1, 2)
-        intro_outro_grid.addWidget(self.enable_outro_checkbox, 4, 0, 1, 2)
-        intro_outro_grid.addWidget(self.use_intro_bg_for_outro, 5, 0, 1, 2)
-        intro_outro_grid.addWidget(QLabel("Durata outro (s)"), 6, 0)
-        intro_outro_grid.addWidget(self.outro_duration_input, 6, 1)
-        intro_outro_grid.addWidget(self.capture_outro_bg_btn, 7, 0, 1, 2)
-        intro_outro_grid.addWidget(self.outro_bg_label, 8, 0, 1, 2)
-        intro_outro_container = QWidget()
-        intro_outro_container.setLayout(intro_outro_grid)
-        self.intro_outro_panel = CollapsiblePanel("Intro / Outro Automatici", expanded=False)
-        self.intro_outro_panel.set_content_layout(QVBoxLayout())
-        self.intro_outro_panel.content.layout().setContentsMargins(0, 0, 0, 0)
-        self.intro_outro_panel.content.layout().addWidget(intro_outro_container)
-        score_layout.addWidget(self.intro_outro_panel)
-        right_layout.addWidget(score_panel)
+        intro_outro_panel = QFrame()
+        intro_outro_panel.setObjectName("inspectorCard")
+        intro_outro_layout = QVBoxLayout(intro_outro_panel)
+        intro_outro_layout.setContentsMargins(10, 10, 10, 10)
+        intro_outro_layout.setSpacing(10)
+        intro_outro_tab = self.ui_shell.right_intro_outro_page.layout()
+        intro_outro_tab.setSpacing(8)
 
-        points_panel = QFrame()
-        points_panel.setObjectName("panel")
-        points_layout = QVBoxLayout(points_panel)
-        points_layout.addWidget(QLabel("<b>Punti selezionati</b>"))
-        points_layout.addWidget(self.segments_list)
-        points_btns = QHBoxLayout()
-        points_btns.addWidget(self.undo_btn)
-        points_btns.addWidget(self.clear_segments_btn)
-        points_btns.addWidget(self.export_btn)
-        points_layout.addLayout(points_btns)
-        highlights_title = QLabel("<b>Highlights</b>")
-        points_layout.addWidget(highlights_title)
-        points_layout.addWidget(self.highlights_list)
-        highlight_btns = QHBoxLayout()
-        highlight_btns.addWidget(self.remove_highlight_btn)
-        highlight_btns.addWidget(self.export_highlights_btn)
-        points_layout.addLayout(highlight_btns)
-        right_layout.addWidget(points_panel)
+        shared_card = QFrame()
+        shared_card.setObjectName("panel")
+        shared_layout = QVBoxLayout(shared_card)
+        shared_layout.setContentsMargins(8, 8, 8, 8)
+        shared_layout.setSpacing(6)
+        shared_title = QLabel("Shared")
+        shared_title.setObjectName("sectionTitle")
+        shared_layout.addWidget(shared_title)
+        shared_layout.addWidget(self.use_intro_bg_for_outro)
+        intro_outro_layout.addWidget(shared_card)
+
+        intro_card = QFrame()
+        intro_card.setObjectName("panel")
+        intro_card_layout = QGridLayout(intro_card)
+        intro_card_layout.setContentsMargins(8, 8, 8, 8)
+        intro_card_layout.setHorizontalSpacing(8)
+        intro_card_layout.setVerticalSpacing(8)
+        intro_title = QLabel("Intro")
+        intro_title.setObjectName("sectionTitle")
+        intro_card_layout.addWidget(intro_title, 0, 0, 1, 2)
+        intro_card_layout.addWidget(self.enable_intro_checkbox, 1, 0, 1, 2)
+        intro_card_layout.addWidget(QLabel("Durata (s)"), 2, 0)
+        intro_card_layout.addWidget(self.intro_duration_input, 2, 1)
+        intro_card_layout.addWidget(self.capture_intro_bg_btn, 3, 0, 1, 2)
+        intro_card_layout.addWidget(self.intro_bg_label, 4, 0, 1, 2)
+        intro_outro_layout.addWidget(intro_card)
+
+        outro_card = QFrame()
+        outro_card.setObjectName("panel")
+        outro_card_layout = QGridLayout(outro_card)
+        outro_card_layout.setContentsMargins(8, 8, 8, 8)
+        outro_card_layout.setHorizontalSpacing(8)
+        outro_card_layout.setVerticalSpacing(8)
+        outro_title = QLabel("Outro")
+        outro_title.setObjectName("sectionTitle")
+        outro_card_layout.addWidget(outro_title, 0, 0, 1, 2)
+        outro_card_layout.addWidget(self.enable_outro_checkbox, 1, 0, 1, 2)
+        outro_card_layout.addWidget(QLabel("Durata (s)"), 2, 0)
+        outro_card_layout.addWidget(self.outro_duration_input, 2, 1)
+        outro_card_layout.addWidget(self.capture_outro_bg_btn, 3, 0, 1, 2)
+        outro_card_layout.addWidget(self.outro_bg_label, 4, 0, 1, 2)
+        intro_outro_layout.addWidget(outro_card)
+        intro_outro_tab.addWidget(intro_outro_panel)
+        intro_outro_tab.addStretch(1)
+
+        export_panel = QFrame()
+        export_panel.setObjectName("inspectorCard")
+        export_layout = QVBoxLayout(export_panel)
+        export_layout.setContentsMargins(10, 10, 10, 10)
+        export_layout.setSpacing(8)
+        export_tab = self.ui_shell.right_export_page.layout()
+        export_tab.setSpacing(8)
+
+        export_title = QLabel("Export")
+        export_title.setObjectName("sectionTitle")
+        export_layout.addWidget(export_title)
+        export_btn_row = QHBoxLayout()
+        export_btn_row.setSpacing(6)
+        export_btn_row.addWidget(self.export_btn)
+        export_btn_row.addWidget(self.export_highlights_btn)
+        export_layout.addLayout(export_btn_row)
+        export_layout.addWidget(self.export_length_label)
+        export_layout.addWidget(QLabel("Riepilogo output"))
+        self.export_summary_label = QLabel("Condensato e highlights disponibili.")
+        self.export_summary_label.setObjectName("metaLabel")
+        export_layout.addWidget(self.export_summary_label)
+        export_tab.addWidget(export_panel)
+        export_tab.addStretch(1)
 
         self.hotkeys_panel = QFrame()
-        self.hotkeys_panel.setObjectName("panel")
+        self.hotkeys_panel.setObjectName("inspectorCard")
         self.hotkeys_layout = QGridLayout(self.hotkeys_panel)
-        self.hotkeys_layout.addWidget(QLabel("<b>Hotkeys configurabili</b>"), 0, 0, 1, 2)
-        right_layout.addWidget(self.hotkeys_panel)
-        right_layout.addStretch()
+        self.hotkeys_layout.setContentsMargins(10, 10, 10, 10)
+        self.hotkeys_layout.setHorizontalSpacing(10)
+        self.hotkeys_layout.setVerticalSpacing(8)
+        self.hotkeys_layout.addWidget(QLabel("Hotkeys configurabili"), 0, 0, 1, 2)
+        self.hotkeys_group_widgets = {}
+        for row_idx, (key, title) in enumerate(
+            [("playback", "Playback"), ("marking", "Point Editing"), ("utility", "Utility")],
+            start=1,
+        ):
+            card = QFrame()
+            card.setObjectName("panel")
+            card_layout = QGridLayout(card)
+            card_layout.setContentsMargins(8, 8, 8, 8)
+            card_layout.setHorizontalSpacing(8)
+            card_layout.setVerticalSpacing(6)
+            section = QLabel(title)
+            section.setObjectName("sectionTitle")
+            card_layout.addWidget(section, 0, 0, 1, 2)
+            self.hotkeys_group_widgets[key] = card_layout
+            self.hotkeys_layout.addWidget(card, row_idx, 0, 1, 2)
+        self.ui_shell.right_hotkeys_page.layout().setSpacing(8)
+        self.ui_shell.right_hotkeys_page.layout().addWidget(self.hotkeys_panel)
+        self.ui_shell.right_hotkeys_page.layout().addStretch(1)
+
+        self._wire_shell_actions()
+        self._apply_button_roles()
+        self._refresh_shell_empty_states()
+
+    def _bind_shell_action(self, action_key: str, callback) -> bool:
+        action = self.ui_shell.actions.get(action_key)
+        if not action or callback is None:
+            if action:
+                action.setEnabled(False)
+            return False
+        action.triggered.connect(callback)
+        action.setEnabled(True)
+        return True
+
+    def _apply_button_roles(self) -> None:
+        role_map = {
+            self.play_pause_btn: "primary",
+            self.mark_start_btn: "secondary",
+            self.mark_end_btn: "secondary",
+            self.point_a_btn: "active",
+            self.point_b_btn: "active",
+            self.add_last_highlight_btn: "secondary",
+            self.undo_btn: "subtle",
+            self.clear_segments_btn: "danger",
+            self.remove_highlight_btn: "danger",
+            self.export_btn: "primary",
+            self.export_highlights_btn: "secondary",
+            self.preview_overlay_btn: "subtle",
+            self.flags_download_btn: "subtle",
+            self.capture_intro_bg_btn: "secondary",
+            self.capture_outro_bg_btn: "secondary",
+            self.load_btn: "primary",
+            self.open_project_btn: "secondary",
+            self.save_project_btn: "secondary",
+            self.quick_undo_btn: "subtle",
+            self.reset_score_btn: "danger",
+            self.empty_state_load_btn: "primary",
+        }
+        for btn, role in role_map.items():
+            btn.setProperty("btnRole", role)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+    def _build_native_menu(self) -> None:
+        menu_bar = self.menuBar()
+        menu_bar.clear()
+        menu_bar.setNativeMenuBar(True)
+
+        file_menu = menu_bar.addMenu("File")
+        file_menu.addAction(self.ui_shell.actions["load_video"])
+        file_menu.addAction(self.ui_shell.actions["open_project"])
+        file_menu.addAction(self.ui_shell.actions["save_project"])
+
+        edit_menu = menu_bar.addMenu("Edit")
+        edit_menu.addAction(self.ui_shell.actions["undo"])
+        edit_menu.addAction(self.ui_shell.actions["clear_focus"])
+
+        view_menu = menu_bar.addMenu("View")
+        view_menu.addAction(self.ui_shell.actions["toggle_score_preview"])
+
+        clip_menu = menu_bar.addMenu("Clip")
+        clip_menu.addAction(self.ui_shell.actions["mark_start"])
+        clip_menu.addAction(self.ui_shell.actions["mark_end"])
+        clip_menu.addAction(self.ui_shell.actions["highlight"])
+
+        score_menu = menu_bar.addMenu("Score")
+        score_menu.addAction(self.ui_shell.actions["point_a"])
+        score_menu.addAction(self.ui_shell.actions["point_b"])
+
+        export_menu = menu_bar.addMenu("Export")
+        export_menu.addAction(self.ui_shell.actions["export"])
+        export_menu.addAction(self.ui_shell.actions["export_highlights"])
+
+        help_menu = menu_bar.addMenu("Help")
+        help_menu.addAction(self.ui_shell.actions["about"])
+
+    def _show_themed_question(self, title: str, text: str, yes_label: str = "Yes", no_label: str = "No") -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setModal(True)
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+        title_label = QLabel(title)
+        title_label.setObjectName("dialogTitle")
+        body_label = QLabel(text)
+        body_label.setWordWrap(True)
+        body_label.setObjectName("statusValue")
+        btns = QDialogButtonBox(dialog)
+        yes_btn = btns.addButton(yes_label, QDialogButtonBox.ButtonRole.AcceptRole)
+        no_btn = btns.addButton(no_label, QDialogButtonBox.ButtonRole.RejectRole)
+        yes_btn.setProperty("btnRole", "primary")
+        no_btn.setProperty("btnRole", "secondary")
+        yes_btn.clicked.connect(dialog.accept)
+        no_btn.clicked.connect(dialog.reject)
+        layout.addWidget(title_label)
+        layout.addWidget(body_label)
+        layout.addWidget(btns)
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _show_themed_error(self, title: str, text: str) -> None:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Critical)
+        dialog.setWindowTitle(title)
+        dialog.setText(text)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.exec()
+
+    def _wire_shell_actions(self) -> None:
+        self._bind_shell_action("load_video", getattr(self, "load_videos", None))
+        self._bind_shell_action("open_project", getattr(self, "load_project", None))
+        self._bind_shell_action("save_project", getattr(self, "save_project", None))
+        self._bind_shell_action("mark_start", getattr(self, "mark_start", None))
+        self._bind_shell_action("mark_end", getattr(self, "mark_end", None))
+        self._bind_shell_action("undo", getattr(self, "undo_last_action", None))
+        self._bind_shell_action("play_pause", getattr(self, "toggle_play_pause", None))
+        self._bind_shell_action("highlight", getattr(self, "add_last_point_to_highlights", None))
+        self._bind_shell_action("export", getattr(self, "export_condensed", None))
+        self._bind_shell_action("export_highlights", getattr(self, "export_highlights", None))
+        self._bind_shell_action("clear_focus", getattr(self, "clear_edit_focus", None))
+
+        if "toggle_score_preview" in self.ui_shell.actions:
+            self.ui_shell.actions["toggle_score_preview"].setCheckable(True)
+            self.ui_shell.actions["toggle_score_preview"].setChecked(True)
+            self.ui_shell.actions["toggle_score_preview"].setEnabled(True)
+            self.ui_shell.actions["toggle_score_preview"].triggered.connect(self.preview_by_timeline.toggle)
+
+        if "point_a" in self.ui_shell.actions:
+            self.ui_shell.actions["point_a"].setEnabled(True)
+            self.ui_shell.actions["point_a"].triggered.connect(lambda: self.tennis_point_winner("A"))
+        if "point_b" in self.ui_shell.actions:
+            self.ui_shell.actions["point_b"].setEnabled(True)
+            self.ui_shell.actions["point_b"].triggered.connect(lambda: self.tennis_point_winner("B"))
+
+        # Explicitly keep non-implemented UI actions disabled.
+        if "about" in self.ui_shell.actions:
+            self.ui_shell.actions["about"].setEnabled(False)
+
+        self._build_native_menu()
 
     def _setup_hotkey_ui(self) -> None:
         label_map = {
-            "play_pause": "Play/Pausa",
+            "play_pause": "Play/Pause",
             "jump_back_5": "Indietro 5s",
             "jump_fwd_5": "Avanti 5s",
             "jump_back_10": "Indietro 10s",
             "jump_fwd_10": "Avanti 10s",
             "jump_back_30": "Indietro 30s",
             "jump_fwd_30": "Avanti 30s",
-            "mark_start": "Inizio punto",
-            "mark_end": "Pausa clip",
-            "point_a": "Punto A",
-            "point_b": "Punto B",
+            "mark_start": "Start Point",
+            "mark_end": "End Point",
+            "point_a": "Point A",
+            "point_b": "Point B",
             "undo": "Undo",
             "clear_focus": "Rilascia focus",
         }
+        group_map = {
+            "play_pause": "playback",
+            "jump_back_5": "playback",
+            "jump_fwd_5": "playback",
+            "jump_back_10": "playback",
+            "jump_fwd_10": "playback",
+            "jump_back_30": "playback",
+            "jump_fwd_30": "playback",
+            "mark_start": "marking",
+            "mark_end": "marking",
+            "point_a": "marking",
+            "point_b": "marking",
+            "undo": "utility",
+            "clear_focus": "utility",
+        }
+        group_row = {"playback": 1, "marking": 1, "utility": 1}
         row = 1
         for action, default_seq in self.hotkey_defaults.items():
             edit = QKeySequenceEdit(QKeySequence(default_seq))
             edit.keySequenceChanged.connect(self._bind_shortcuts)
-            self.hotkeys_layout.addWidget(QLabel(label_map[action]), row, 0)
-            self.hotkeys_layout.addWidget(edit, row, 1)
+            target_group = group_map.get(action, "utility")
+            target_layout = self.hotkeys_group_widgets.get(target_group, self.hotkeys_layout)
+            target_row = group_row.get(target_group, row)
+            target_layout.addWidget(QLabel(label_map[action]), target_row, 0)
+            target_layout.addWidget(edit, target_row, 1)
+            group_row[target_group] = target_row + 1
             self.hotkey_edits[action] = edit
             row += 1
 
@@ -1526,12 +1948,58 @@ class MainWindow(QMainWindow):
             shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
             shortcut.activated.connect(lambda cb=callback: self._run_shortcut_action(cb))
             self.shortcuts[key] = shortcut
+        if hasattr(self, "ui_shell"):
+            self.ui_shell.hotkeys_state_label.setText("Hotkeys: active")
 
     def _run_shortcut_action(self, callback) -> None:
         focus = self.focusWidget()
         if isinstance(focus, QKeySequenceEdit):
             return
         callback()
+
+    def _refresh_point_open_chip(self) -> None:
+        if hasattr(self, "server_status_chip"):
+            self.server_status_chip.setText(f"Server: {self.current_server}")
+        if hasattr(self, "point_open_chip"):
+            if self.pending_point_start is not None:
+                self.point_open_chip.setText(f"POINT OPEN {format_time(self.pending_point_start)}")
+                self.point_open_chip.setProperty("chipState", "active")
+            else:
+                self.point_open_chip.setText("Idle")
+                self.point_open_chip.setProperty("chipState", "idle")
+            self.point_open_chip.style().unpolish(self.point_open_chip)
+            self.point_open_chip.style().polish(self.point_open_chip)
+        if hasattr(self, "transport_status_chip"):
+            if self.pending_point_start is not None:
+                self.transport_status_chip.setText(f"REC {format_time(self.pending_point_start)}")
+                self.transport_status_chip.setProperty("chipState", "active")
+            else:
+                self.transport_status_chip.setText("Ready")
+                self.transport_status_chip.setProperty("chipState", "idle")
+            self.transport_status_chip.style().unpolish(self.transport_status_chip)
+            self.transport_status_chip.style().polish(self.transport_status_chip)
+
+    def _refresh_shell_empty_states(self) -> None:
+        has_video = bool(self.input_path)
+        if hasattr(self, "video_stage_stack"):
+            # 0: video stage, 1: empty state surface
+            self.video_stage_stack.widget(1).setVisible(not has_video)
+        if hasattr(self, "empty_state_load_btn"):
+            self.empty_state_load_btn.setEnabled(True)
+        if hasattr(self, "source_empty_label"):
+            if len(self.input_paths) == 0:
+                self.source_empty_label.setText("No source loaded")
+                self.source_empty_label.setVisible(True)
+            else:
+                active_name = os.path.basename(self.input_path) if self.input_path else os.path.basename(self.input_paths[0])
+                self.source_empty_label.setText(f"Active: {active_name}")
+                self.source_empty_label.setVisible(True)
+        if hasattr(self, "segments_empty_label"):
+            self.segments_empty_label.setVisible(len(self.segments) == 0)
+        if hasattr(self, "highlights_empty_label"):
+            has_highlights = any(seg.is_highlight for seg in self.segments)
+            self.highlights_empty_label.setVisible(not has_highlights)
+        self._refresh_point_open_chip()
 
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
@@ -1690,8 +2158,8 @@ class MainWindow(QMainWindow):
     def update_point_buttons(self) -> None:
         name_a = self._short_player_name(self.player_a_input.text(), "A")
         name_b = self._short_player_name(self.player_b_input.text(), "B")
-        self.point_a_btn.setText(f"Punto {name_a}")
-        self.point_b_btn.setText(f"Punto {name_b}")
+        self.point_a_btn.setText(f"Point {name_a}")
+        self.point_b_btn.setText(f"Point {name_b}")
 
     def update_score_preview_label(self) -> None:
         state = self.current_overlay_state()
@@ -1722,6 +2190,14 @@ class MainWindow(QMainWindow):
         self.score_preview_label.setText(
             f"Preview {prefix}: Game {state.games_a}-{state.games_b} | Pts {state.points_a}-{state.points_b}"
         )
+        if hasattr(self, "score_summary_card"):
+            name_a = self._short_player_name(state.player_a, "A")
+            name_b = self._short_player_name(state.player_b, "B")
+            self.score_summary_card.setText(
+                f"{name_a}  S{state.sets_a} G{state.games_a} P{state.points_a}    "
+                f"{name_b}  S{state.sets_b} G{state.games_b} P{state.points_b}"
+            )
+        self._refresh_point_open_chip()
 
     def overlay_state_for_current_position(self) -> OverlayState | None:
         if not self.input_path or not self.segments:
@@ -1773,14 +2249,27 @@ class MainWindow(QMainWindow):
                 return
 
             dialog = QDialog(self)
+            dialog.setObjectName("overlayPreviewDialog")
             dialog.setWindowTitle("Preview grafica overlay")
             dialog.setMinimumSize(900, 560)
             layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+            title = QLabel("Preview grafica overlay")
+            title.setObjectName("dialogTitle")
             scale_label = self.overlay_scale_combo.currentText().strip() or f"{int(overlay_state.overlay_scale * 100)}%"
             info = QLabel(
                 f"Frame a {format_time(t)} | Posizione {overlay_state.overlay_corner} | Scala {scale_label}"
             )
+            info.setObjectName("previewMetaLabel")
+            img_wrap = QFrame()
+            img_wrap.setObjectName("previewImageContainer")
+            img_wrap_layout = QVBoxLayout(img_wrap)
+            img_wrap_layout.setContentsMargins(10, 10, 10, 10)
+            img_wrap_layout.setSpacing(0)
             img = QLabel()
+            img.setObjectName("previewImageLabel")
+            img.setAlignment(Qt.AlignmentFlag.AlignCenter)
             pix = QPixmap(out_png)
             img.setPixmap(
                 pix.scaled(
@@ -1790,8 +2279,14 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
+            img_wrap_layout.addWidget(img, 1)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+            buttons.rejected.connect(dialog.reject)
+            buttons.accepted.connect(dialog.accept)
+            layout.addWidget(title)
             layout.addWidget(info)
-            layout.addWidget(img, 1)
+            layout.addWidget(img_wrap, 1)
+            layout.addWidget(buttons)
             dialog.exec()
 
     def sync_overlay_state_from_inputs(self) -> None:
@@ -1956,9 +2451,15 @@ class MainWindow(QMainWindow):
         return total
 
     def update_export_length_label(self) -> None:
-        self.export_length_label.setText(
-            f"Durata export stimata: {format_time(self.estimated_export_duration())}"
-        )
+        eta_txt = format_time(self.estimated_export_duration())
+        self.export_length_label.setText(f"Durata export stimata: {eta_txt}")
+        if hasattr(self, "ui_shell"):
+            self.ui_shell.export_estimate_label.setText(f"Export: {eta_txt}")
+        if hasattr(self, "export_summary_label"):
+            hl_count = sum(1 for seg in self.segments if seg.is_highlight)
+            self.export_summary_label.setText(
+                f"Segmenti: {len(self.segments)} | Highlights: {hl_count}"
+            )
 
     def load_videos(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -1990,6 +2491,9 @@ class MainWindow(QMainWindow):
         self.undo_stack.clear()
         self.refresh_segments()
         self._refresh_intro_outro_labels()
+        if hasattr(self, "ui_shell"):
+            self.ui_shell.source_fps_label.setText("FPS: --")
+        self._refresh_shell_empty_states()
         if len(self.input_paths) == 1:
             self.set_status(f"Video caricato: {self.input_paths[0]}")
         else:
@@ -2007,6 +2511,7 @@ class MainWindow(QMainWindow):
             return
         self.input_path = str(data)
         self.player.setSource(QUrl.fromLocalFile(self.input_path))
+        self._refresh_shell_empty_states()
         if self.pending_point_start is not None:
             self.set_status(
                 f"Clip attiva: {os.path.basename(self.input_path)} (punto in corso, chiudilo con Pausa clip o Punto A/B)."
@@ -2275,7 +2780,7 @@ class MainWindow(QMainWindow):
             self.set_status(f"Progetto salvato: {output_path}")
             self.autosave_project()
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Errore salvataggio", str(exc))
+            self._show_themed_error("Errore salvataggio", str(exc))
 
     def autosave_project(self) -> None:
         if not self.input_paths and not self.segments:
@@ -2289,14 +2794,13 @@ class MainWindow(QMainWindow):
     def try_restore_autosave(self) -> None:
         if not os.path.exists(self.autosave_path):
             return
-        choice = QMessageBox.question(
-            self,
+        accepted = self._show_themed_question(
             "Ripristino autosave",
             "Trovato un autosave progetto. Vuoi ripristinarlo?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+            "Ripristina",
+            "Ignora",
         )
-        if choice != QMessageBox.StandardButton.Yes:
+        if not accepted:
             return
         try:
             with open(self.autosave_path, "r", encoding="utf-8") as f:
@@ -2319,7 +2823,7 @@ class MainWindow(QMainWindow):
                 data = json.load(f)
             self._load_project_data(data, input_path)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Errore caricamento progetto", str(exc))
+            self._show_themed_error("Errore caricamento progetto", str(exc))
 
     def _load_project_data(self, data: dict, source_label: str) -> None:
         input_paths = data.get("input_paths", [])
@@ -2464,6 +2968,7 @@ class MainWindow(QMainWindow):
         self.undo_stack.clear()
         self.refresh_segments()
         self.update_overlay()
+        self._refresh_shell_empty_states()
         self.set_status(f"Progetto caricato: {source_label}")
         self.autosave_project()
 
@@ -2498,6 +3003,7 @@ class MainWindow(QMainWindow):
         self.pending_point_start = self.current_time_sec()
         self.pending_point_source_path = self.input_path
         self.update_highlight_controls()
+        self._refresh_point_open_chip()
         self.set_status(f"Inizio punto marcato a {format_time(self.pending_point_start)}.")
 
     def _probe_clip_duration(self, path: str) -> float | None:
@@ -2623,23 +3129,27 @@ class MainWindow(QMainWindow):
     def refresh_segments(self) -> None:
         self.segments_list.clear()
         if not self.segments:
-            self.segments_list.addItem("Nessun punto selezionato.")
             self.refresh_highlights_list()
             self.update_highlight_controls()
             self.update_export_length_label()
+            self._refresh_shell_empty_states()
             return
         for idx, seg in enumerate(self.segments, 1):
             score = f"{seg.overlay.points_a}-{seg.overlay.points_b}"
-            hl = " | HIGHLIGHT" if seg.is_highlight else ""
+            badge = "★ HIGHLIGHT" if seg.is_highlight else "POINT"
             row = (
-                f"#{idx} {format_time(seg.start)} - {format_time(seg.end)} | "
-                f"game {seg.overlay.games_a}-{seg.overlay.games_b} | pts {score} | "
-                f"{os.path.basename(seg.source_path)}{hl}"
+                f"#{idx}  {format_time(seg.start)} - {format_time(seg.end)}\n"
+                f"{badge} | S {seg.overlay.sets_a}-{seg.overlay.sets_b}  G {seg.overlay.games_a}-{seg.overlay.games_b}  P {score}  SRV {seg.overlay.server}\n"
+                f"{os.path.basename(seg.source_path)}"
             )
-            self.segments_list.addItem(QListWidgetItem(row))
+            item = QListWidgetItem(row)
+            item.setData(Qt.ItemDataRole.UserRole, idx - 1)
+            item.setToolTip(f"Clip #{idx} - {os.path.basename(seg.source_path)}")
+            self.segments_list.addItem(item)
         self.refresh_highlights_list()
         self.update_highlight_controls()
         self.update_export_length_label()
+        self._refresh_shell_empty_states()
 
     def refresh_highlights_list(self) -> None:
         self.highlights_list.clear()
@@ -2647,12 +3157,16 @@ class MainWindow(QMainWindow):
             if not seg.is_highlight:
                 continue
             row = (
-                f"#{idx + 1} {format_time(seg.start)} - {format_time(seg.end)} | "
+                f"★ #{idx + 1}  {format_time(seg.start)} - {format_time(seg.end)}\n"
+                f"S {seg.overlay.sets_a}-{seg.overlay.sets_b}  G {seg.overlay.games_a}-{seg.overlay.games_b}  "
+                f"P {seg.overlay.points_a}-{seg.overlay.points_b}\n"
                 f"{os.path.basename(seg.source_path)}"
             )
             item = QListWidgetItem(row)
             item.setData(Qt.ItemDataRole.UserRole, idx)
+            item.setToolTip(f"Highlight punto #{idx + 1}")
             self.highlights_list.addItem(item)
+        self._refresh_shell_empty_states()
 
     def update_highlight_controls(self) -> None:
         can_add = self.pending_point_start is None and len(self.segments) > 0
@@ -3008,7 +3522,12 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.export_highlights_btn.setEnabled(False)
         self.set_status(f"Export {export_kind} in corso...")
+        if self.export_progress_dialog is not None:
+            self.export_progress_dialog.close()
+            self.export_progress_dialog = None
         self.export_progress_dialog = ExportProgressDialog(self)
+        self.export_progress_dialog.finished.connect(self._on_export_dialog_closed)
+        self.export_progress_dialog.set_mode(export_kind, output_path)
         self.export_progress_dialog.set_progress(0, 0.0, 0.0, "Preparazione export...")
         self.export_progress_dialog.show()
         export_segments = self._build_export_segments(source_segments)
@@ -3042,6 +3561,9 @@ class MainWindow(QMainWindow):
         self.export_worker.finished_ok.connect(self.on_export_ok)
         self.export_worker.failed.connect(self.on_export_failed)
         self.export_worker.start()
+
+    def _on_export_dialog_closed(self) -> None:
+        self.export_progress_dialog = None
 
     def export_condensed(self) -> None:
         if not self.input_path:
@@ -3091,19 +3613,15 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(True)
         self.update_highlight_controls()
         if self.export_progress_dialog is not None:
-            self.export_progress_dialog.close()
-            self.export_progress_dialog = None
+            self.export_progress_dialog.set_success(self.current_export_kind, output_path, chunks)
         self.set_status(f"Export {self.current_export_kind} completato: {output_path} ({chunks} clip).")
-        QMessageBox.information(self, "Completato", f"Video esportato:\n{output_path}")
 
     def on_export_failed(self, message: str) -> None:
         self.export_btn.setEnabled(True)
         self.update_highlight_controls()
         if self.export_progress_dialog is not None:
-            self.export_progress_dialog.close()
-            self.export_progress_dialog = None
+            self.export_progress_dialog.set_error(self.current_export_kind, message)
         self.set_status(f"Export {self.current_export_kind} fallito: {message}")
-        QMessageBox.critical(self, "Errore export", message)
 
     def clear_edit_focus(self) -> None:
         for field in [
