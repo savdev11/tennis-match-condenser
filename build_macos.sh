@@ -55,6 +55,11 @@ if [[ -f "$APP_PLIST" ]]; then
     || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $APP_VERSION" "$APP_PLIST"
 fi
 
+# Re-sign after Info.plist edits; otherwise macOS reports invalid signature.
+if [[ -d "$DIST_DIR/$APP_NAME.app" ]]; then
+  codesign --force --deep --sign - "$DIST_DIR/$APP_NAME.app"
+fi
+
 mkdir -p "$STAGING_DIR"
 rm -rf "$STAGING_DIR/$APP_NAME.app" "$STAGING_DIR/Applications"
 cp -R "$DIST_DIR/$APP_NAME.app" "$STAGING_DIR/"
