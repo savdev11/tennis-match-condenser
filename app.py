@@ -11,7 +11,7 @@ import urllib.request
 import ssl
 
 import imageio_ffmpeg
-from PySide6.QtCore import QThread, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QStandardPaths, QThread, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QFont, QPixmap, QImage
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -2307,7 +2307,11 @@ class MainWindow(QMainWindow):
         self.update_overlay()
 
     def _flags_cache_dir(self) -> str:
-        path = os.path.join(os.getcwd(), "assets", "flags_cache")
+        # Use an app-writable location; bundled macOS apps may run with a read-only cwd.
+        base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+        if not base:
+            base = os.path.join(os.path.expanduser("~"), ".tennis-match-condenser")
+        path = os.path.join(base, "flags_cache")
         os.makedirs(path, exist_ok=True)
         return path
 
