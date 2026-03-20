@@ -2586,12 +2586,28 @@ class MainWindow(QMainWindow):
             return None
         return self._overlay_state_from_runtime(state)
 
+    def derive_overlay_state_after_point(self, point_ref: int | PointRecord) -> OverlayState | None:
+        state = self.derive_match_state_after_point(point_ref)
+        if state is None:
+            return None
+        return self._overlay_state_from_runtime(state)
+
     def derive_overlay_state_for_position(self, source_path: str, local_time: float) -> OverlayState | None:
         point_idx = self._resolve_point_selection_for_position(source_path, local_time)
         if point_idx is None or point_idx < 0 or point_idx >= len(self.points):
             return None
         point = self.points[point_idx]
         if point.winner in ("A", "B"):
+            bounds = self._point_source_bounds(point, source_path)
+            if bounds is None:
+                return self.derive_overlay_state_before_point(point)
+            point_start, point_end = bounds
+            # Finalized points use PRE-point state while cursor is inside the point range,
+            # and POST-point state in the dead zone after the point.
+            if point_start <= local_time <= point_end:
+                return self.derive_overlay_state_before_point(point)
+            if local_time > point_end:
+                return self.derive_overlay_state_after_point(point)
             return self.derive_overlay_state_before_point(point)
         if self.capture_state in ("RECORDING", "PAUSED_WITHIN_POINT") and self.open_point_id == point.id:
             return self.current_overlay_state()
