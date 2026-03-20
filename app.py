@@ -107,6 +107,26 @@ class PointRecord:
     overlay_at_end: OverlayState | None = None
 
 
+@dataclass
+class MatchRuntimeState:
+    starting_server: str
+    current_server: str
+    tiebreak_first_server: str | None
+    points_a: int
+    points_b: int
+    tb_points_a: int
+    tb_points_b: int
+    games_a: int
+    games_b: int
+    sets_a: int
+    sets_b: int
+    completed_sets: list[tuple[int, int]]
+    completed_set_tb_loser_points: list[int | None]
+    in_tiebreak: bool
+    tiebreak_target: int
+    tiebreak_super: bool
+
+
 def format_time(seconds: float) -> str:
     total = max(0, int(seconds))
     hours = total // 3600
@@ -2268,6 +2288,315 @@ class MainWindow(QMainWindow):
     def _has_finalized_points(self) -> bool:
         return any(point.winner in ("A", "B") for point in self.points)
 
+    def _ordered_points(self) -> list[PointRecord]:
+        return sorted(self.points, key=lambda point: point.id)
+
+    def _resolve_point_ref(self, point_ref: int | PointRecord) -> PointRecord | None:
+        if isinstance(point_ref, PointRecord):
+            return point_ref
+        for point in self.points:
+            if point.id == point_ref:
+                return point
+        if 0 <= point_ref < len(self.points):
+            return self.points[point_ref]
+        return None
+
+    def _runtime_opponent(self, side: str) -> str:
+        return "B" if side == "A" else "A"
+
+    def _runtime_initial_server(self) -> str:
+        if self.starting_server in ("A", "B"):
+            return self.starting_server
+        selected = self._server_from_combo()
+        if selected in ("A", "B"):
+            return selected
+        return "A"
+
+    def _runtime_initial_state(self) -> MatchRuntimeState:
+        initial_server = self._runtime_initial_server()
+        return MatchRuntimeState(
+            starting_server=initial_server,
+            current_server=initial_server,
+            tiebreak_first_server=None,
+            points_a=0,
+            points_b=0,
+            tb_points_a=0,
+            tb_points_b=0,
+            games_a=0,
+            games_b=0,
+            sets_a=0,
+            sets_b=0,
+            completed_sets=[],
+            completed_set_tb_loser_points=[],
+            in_tiebreak=False,
+            tiebreak_target=7,
+            tiebreak_super=False,
+        )
+
+    def _runtime_start_tiebreak(self, state: MatchRuntimeState, target: int, super_mode: bool) -> None:
+        state.in_tiebreak = True
+        state.tiebreak_target = target
+        state.tiebreak_super = super_mode
+        state.tiebreak_first_server = state.current_server
+        state.points_a = 0
+        state.points_b = 0
+        state.tb_points_a = 0
+        state.tb_points_b = 0
+
+    def _runtime_award_set_from_tiebreak(self, state: MatchRuntimeState, side: str) -> None:
+        if state.tiebreak_super:
+            final_games = (state.tb_points_a, state.tb_points_b)
+            state.completed_set_tb_loser_points.append(None)
+        else:
+            final_games = (7, 6) if side == "A" else (6, 7)
+            loser_tb = state.tb_points_b if side == "A" else state.tb_points_a
+            state.completed_set_tb_loser_points.append(loser_tb)
+        state.completed_sets.append(final_games)
+        if side == "A":
+            state.sets_a += 1
+        else:
+            state.sets_b += 1
+        state.games_a = 0
+        state.games_b = 0
+        state.points_a = 0
+        state.points_b = 0
+        state.tb_points_a = 0
+        state.tb_points_b = 0
+        state.in_tiebreak = False
+        state.tiebreak_super = False
+        state.tiebreak_target = 7
+        if state.tiebreak_first_server in ("A", "B"):
+            state.current_server = self._runtime_opponent(state.tiebreak_first_server)
+        state.tiebreak_first_server = None
+
+    def _runtime_award_game(self, state: MatchRuntimeState, side: str) -> None:
+        if side == "A":
+            state.games_a += 1
+        else:
+            state.games_b += 1
+        state.points_a = 0
+        state.points_b = 0
+        state.current_server = self._runtime_opponent(state.current_server)
+        if state.games_a == 6 and state.games_b == 6:
+            self._runtime_start_tiebreak(state, 7, False)
+            return
+        set_ended = False
+        if state.games_a >= 6 and state.games_a - state.games_b >= 2:
+            state.completed_sets.append((state.games_a, state.games_b))
+            state.completed_set_tb_loser_points.append(None)
+            state.sets_a += 1
+            state.games_a = 0
+            state.games_b = 0
+            set_ended = True
+        elif state.games_b >= 6 and state.games_b - state.games_a >= 2:
+            state.completed_sets.append((state.games_a, state.games_b))
+            state.completed_set_tb_loser_points.append(None)
+            state.sets_b += 1
+            state.games_a = 0
+            state.games_b = 0
+            set_ended = True
+        if (
+            set_ended
+            and self.best_of.currentIndex() == 0
+            and self.deciding_set_mode.currentIndex() == 1
+            and state.sets_a == 1
+            and state.sets_b == 1
+        ):
+            self._runtime_start_tiebreak(state, 10, True)
+
+    def _runtime_apply_point_winner(self, state: MatchRuntimeState, side: str) -> None:
+        if state.in_tiebreak:
+            if side == "A":
+                state.tb_points_a += 1
+            else:
+                state.tb_points_b += 1
+            a_tb, b_tb = state.tb_points_a, state.tb_points_b
+            total_tb_points = a_tb + b_tb
+            if a_tb >= state.tiebreak_target and a_tb - b_tb >= 2:
+                self._runtime_award_set_from_tiebreak(state, "A")
+            elif b_tb >= state.tiebreak_target and b_tb - a_tb >= 2:
+                self._runtime_award_set_from_tiebreak(state, "B")
+            elif total_tb_points % 2 == 1:
+                state.current_server = self._runtime_opponent(state.current_server)
+            return
+        if side == "A":
+            a, b = state.points_a, state.points_b
+            if a <= 2:
+                state.points_a += 1
+            elif a == 3 and b <= 2:
+                self._runtime_award_game(state, "A")
+            elif a == 3 and b == 3:
+                state.points_a = 4
+            elif a == 4:
+                self._runtime_award_game(state, "A")
+            elif b == 4:
+                state.points_b = 3
+            return
+        a, b = state.points_a, state.points_b
+        if b <= 2:
+            state.points_b += 1
+        elif b == 3 and a <= 2:
+            self._runtime_award_game(state, "B")
+        elif b == 3 and a == 3:
+            state.points_b = 4
+        elif b == 4:
+            self._runtime_award_game(state, "B")
+        elif a == 4:
+            state.points_a = 3
+
+    def _replay_runtime_state(self, stop_before_point_id: int | None = None, stop_after_point_id: int | None = None) -> MatchRuntimeState:
+        state = self._runtime_initial_state()
+        for point in self._ordered_points():
+            if point.winner not in ("A", "B"):
+                continue
+            if stop_before_point_id is not None and point.id >= stop_before_point_id:
+                break
+            self._runtime_apply_point_winner(state, point.winner)
+            if stop_after_point_id is not None and point.id == stop_after_point_id:
+                break
+        return state
+
+    def derive_match_state_before_point(self, point_ref: int | PointRecord) -> MatchRuntimeState | None:
+        point = self._resolve_point_ref(point_ref)
+        if point is None:
+            return None
+        return self._replay_runtime_state(stop_before_point_id=point.id)
+
+    def derive_match_state_after_point(self, point_ref: int | PointRecord) -> MatchRuntimeState | None:
+        point = self._resolve_point_ref(point_ref)
+        if point is None:
+            return None
+        return self._replay_runtime_state(stop_after_point_id=point.id)
+
+    def get_server_for_point(self, point_ref: int | PointRecord) -> str | None:
+        state = self.derive_match_state_before_point(point_ref)
+        return state.current_server if state is not None else None
+
+    def _runtime_active_points_text(self, state: MatchRuntimeState) -> tuple[str, str]:
+        if state.in_tiebreak:
+            return str(state.tb_points_a), str(state.tb_points_b)
+        return self.points_text(state.points_a), self.points_text(state.points_b)
+
+    def _overlay_set_columns_from_runtime(self, state: MatchRuntimeState) -> tuple[str, str, str, str]:
+        set1_a = ""
+        set1_b = ""
+        set2_a = ""
+        set2_b = ""
+        if len(state.completed_sets) >= 1:
+            set1_a = str(state.completed_sets[0][0])
+            set1_b = str(state.completed_sets[0][1])
+        else:
+            set1_a = str(state.games_a)
+            set1_b = str(state.games_b)
+        if len(state.completed_sets) >= 2:
+            set2_a = str(state.completed_sets[1][0])
+            set2_b = str(state.completed_sets[1][1])
+        elif len(state.completed_sets) == 1:
+            set2_a = str(state.games_a)
+            set2_b = str(state.games_b)
+        return set1_a, set1_b, set2_a, set2_b
+
+    def _wins_game_on_point_runtime(self, side: str, state: MatchRuntimeState) -> bool:
+        if state.in_tiebreak:
+            return False
+        if side == "A":
+            if state.points_a <= 2:
+                return False
+            if state.points_a == 3 and state.points_b <= 2:
+                return True
+            return state.points_a == 4
+        if state.points_b <= 2:
+            return False
+        if state.points_b == 3 and state.points_a <= 2:
+            return True
+        return state.points_b == 4
+
+    def _set_winner_if_point_won_runtime(self, side: str, state: MatchRuntimeState) -> str | None:
+        if state.in_tiebreak:
+            a_tb = state.tb_points_a + (1 if side == "A" else 0)
+            b_tb = state.tb_points_b + (1 if side == "B" else 0)
+            if a_tb >= state.tiebreak_target and a_tb - b_tb >= 2:
+                return "A"
+            if b_tb >= state.tiebreak_target and b_tb - a_tb >= 2:
+                return "B"
+            return None
+        if not self._wins_game_on_point_runtime(side, state):
+            return None
+        new_games_a = state.games_a + (1 if side == "A" else 0)
+        new_games_b = state.games_b + (1 if side == "B" else 0)
+        if new_games_a >= 6 and new_games_a - new_games_b >= 2:
+            return "A"
+        if new_games_b >= 6 and new_games_b - new_games_a >= 2:
+            return "B"
+        return None
+
+    def _match_winner_if_point_won_runtime(self, side: str, state: MatchRuntimeState) -> str | None:
+        set_winner = self._set_winner_if_point_won_runtime(side, state)
+        if not set_winner:
+            return None
+        needed_sets = 2 if self.best_of.currentIndex() == 0 else 3
+        new_sets_a = state.sets_a + (1 if set_winner == "A" else 0)
+        new_sets_b = state.sets_b + (1 if set_winner == "B" else 0)
+        if new_sets_a >= needed_sets:
+            return "A"
+        if new_sets_b >= needed_sets:
+            return "B"
+        return None
+
+    def _alert_banner_from_runtime(self, state: MatchRuntimeState) -> str:
+        if self._match_winner_if_point_won_runtime("A", state) or self._match_winner_if_point_won_runtime("B", state):
+            return "MATCH POINT"
+        if self._set_winner_if_point_won_runtime("A", state) or self._set_winner_if_point_won_runtime("B", state):
+            return "SET POINT"
+        receiver = self._runtime_opponent(state.current_server)
+        if self._wins_game_on_point_runtime(receiver, state):
+            return "BREAK POINT"
+        return ""
+
+    def _overlay_state_from_runtime(self, state: MatchRuntimeState) -> OverlayState:
+        points_a_text, points_b_text = self._runtime_active_points_text(state)
+        set1_a, set1_b, set2_a, set2_b = self._overlay_set_columns_from_runtime(state)
+        return OverlayState(
+            player_a=self.player_a_input.text().strip() or "Giocatore A",
+            player_b=self.player_b_input.text().strip() or "Giocatore B",
+            sets_a=state.sets_a,
+            sets_b=state.sets_b,
+            games_a=state.games_a,
+            games_b=state.games_b,
+            points_a=points_a_text,
+            points_b=points_b_text,
+            server=state.current_server,
+            tournament=self.tournament_input.text().strip() or "Amateur Tennis Tour",
+            overlay_corner=self.overlay_corner_combo.currentText(),
+            overlay_scale=self.overlay_widget.scale_factor,
+            set_col1_a=set1_a,
+            set_col1_b=set1_b,
+            set_col2_a=set2_a,
+            set_col2_b=set2_b,
+            alert_banner=self._alert_banner_from_runtime(state),
+            flag_a_code=normalize_flag_code(self.flag_a_code_input.text()),
+            flag_b_code=normalize_flag_code(self.flag_b_code_input.text()),
+            flag_a_path=self.flag_a_path,
+            flag_b_path=self.flag_b_path,
+        )
+
+    def derive_overlay_state_before_point(self, point_ref: int | PointRecord) -> OverlayState | None:
+        state = self.derive_match_state_before_point(point_ref)
+        if state is None:
+            return None
+        return self._overlay_state_from_runtime(state)
+
+    def derive_overlay_state_for_position(self, source_path: str, local_time: float) -> OverlayState | None:
+        point_idx = self._resolve_point_selection_for_position(source_path, local_time)
+        if point_idx is None or point_idx < 0 or point_idx >= len(self.points):
+            return None
+        point = self.points[point_idx]
+        if point.winner in ("A", "B"):
+            return self.derive_overlay_state_before_point(point)
+        if self.capture_state in ("RECORDING", "PAUSED_WITHIN_POINT") and self.open_point_id == point.id:
+            return self.current_overlay_state()
+        return self.derive_overlay_state_before_point(point)
+
     def _sync_legacy_pending_fields(self) -> None:
         if self.capture_state == "IDLE":
             self.pending_point_start = None
@@ -2372,12 +2701,10 @@ class MainWindow(QMainWindow):
 
     def _flatten_points_to_segments(self) -> list[Segment]:
         flat: list[Segment] = []
-        ordered_points = sorted(self.points, key=lambda p: p.id)
-        for point in ordered_points:
-            if point.winner in ("A", "B") and point.overlay_at_end is not None:
-                overlay_ref = point.overlay_at_end
-            else:
-                overlay_ref = point.overlay_at_start or point.overlay_at_end or self.current_overlay_state()
+        for point in self._ordered_points():
+            overlay_ref = self.derive_overlay_state_before_point(point)
+            if overlay_ref is None:
+                overlay_ref = self.current_overlay_state()
             for clip in point.clips:
                 if clip.end - clip.start <= 0:
                     continue
@@ -2393,11 +2720,11 @@ class MainWindow(QMainWindow):
         return flat
 
     def _overlay_for_point_preview(self, point: PointRecord) -> OverlayState | None:
-        if point.winner in ("A", "B") and point.overlay_at_end is not None:
-            return point.overlay_at_end
-        if point.overlay_at_start is not None:
-            return point.overlay_at_start
-        return None
+        if point.winner in ("A", "B"):
+            return self.derive_overlay_state_before_point(point)
+        if self.capture_state in ("RECORDING", "PAUSED_WITHIN_POINT") and self.open_point_id == point.id:
+            return self.current_overlay_state()
+        return self.derive_overlay_state_before_point(point)
 
     def _rebuild_segments_from_points(self) -> None:
         self.segments = self._flatten_points_to_segments()
@@ -2445,27 +2772,25 @@ class MainWindow(QMainWindow):
         return created
 
     def _replay_score_from_points(self) -> None:
-        selected_server = self._server_from_combo()
-        self.starting_server = selected_server or self.starting_server or "A"
-        self.current_server = self.starting_server
-        self.tiebreak_first_server = None
-        self.points_a = 0
-        self.points_b = 0
-        self.tb_points_a = 0
-        self.tb_points_b = 0
-        self.in_tiebreak = False
-        self.tiebreak_target = 7
-        self.tiebreak_super = False
-        self.completed_sets = []
-        self.completed_set_tb_loser_points = []
-        self.games_a = 0
-        self.games_b = 0
-        self.sets_a = 0
-        self.sets_b = 0
-        for point in sorted(self.points, key=lambda p: p.id):
-            if point.winner in ("A", "B"):
-                self._apply_point_winner_to_score(point.winner)
-        self._set_server_combo(self.current_server)
+        runtime = self._replay_runtime_state()
+        self.starting_server = runtime.starting_server
+        self.current_server = runtime.current_server
+        self.tiebreak_first_server = runtime.tiebreak_first_server
+        self.points_a = runtime.points_a
+        self.points_b = runtime.points_b
+        self.tb_points_a = runtime.tb_points_a
+        self.tb_points_b = runtime.tb_points_b
+        self.in_tiebreak = runtime.in_tiebreak
+        self.tiebreak_target = runtime.tiebreak_target
+        self.tiebreak_super = runtime.tiebreak_super
+        self.completed_sets = list(runtime.completed_sets)
+        self.completed_set_tb_loser_points = list(runtime.completed_set_tb_loser_points)
+        self.games_a = runtime.games_a
+        self.games_b = runtime.games_b
+        self.sets_a = runtime.sets_a
+        self.sets_b = runtime.sets_b
+        if self.initial_server_explicitly_set:
+            self._set_server_combo(self.starting_server)
         self.sets_a_input.setText(str(self.sets_a))
         self.sets_b_input.setText(str(self.sets_b))
         self.games_a_input.setText(str(self.games_a))
@@ -2505,6 +2830,8 @@ class MainWindow(QMainWindow):
         self.current_server = selected
         self.tiebreak_first_server = None
         self.initial_server_explicitly_set = True
+        if self._has_finalized_points():
+            self._replay_score_from_points()
         self.update_overlay()
 
     def update_overlay(self) -> None:
@@ -2548,15 +2875,20 @@ class MainWindow(QMainWindow):
 
     def update_score_preview_label(self) -> None:
         state = self.current_overlay_state()
-        prefix = "Timeline"
-        preview = self.overlay_state_for_current_position()
-        if preview is not None:
-            state = preview
+        prefix = "Live"
+        if self.capture_state in ("RECORDING", "PAUSED_WITHIN_POINT"):
+            state = self.current_overlay_state()
+            prefix = "Live"
         else:
-            last_state = self.last_overlay_state_for_active_clip()
-            if last_state is not None:
-                state = last_state
-                prefix = "Ultimo punto"
+            preview = self.overlay_state_for_current_position()
+            if preview is not None:
+                state = preview
+                prefix = "Timeline"
+            else:
+                last_state = self.last_overlay_state_for_active_clip()
+                if last_state is not None:
+                    state = last_state
+                    prefix = "Ultimo punto"
         self.score_preview_label.setText(
             f"Preview {prefix}: Game {state.games_a}-{state.games_b} | Pts {state.points_a}-{state.points_b}"
         )
@@ -2576,11 +2908,7 @@ class MainWindow(QMainWindow):
     def overlay_state_for_current_position(self) -> OverlayState | None:
         if not self.input_path or not self.points:
             return None
-        now = self.current_time_sec()
-        point_idx = self._resolve_point_selection_for_position(self.input_path, now)
-        if point_idx is None or point_idx < 0 or point_idx >= len(self.points):
-            return None
-        return self._overlay_for_point_preview(self.points[point_idx])
+        return self.derive_overlay_state_for_position(self.input_path, self.current_time_sec())
 
     def last_overlay_state_for_active_clip(self) -> OverlayState | None:
         if not self.input_path or not self.points:
@@ -2606,6 +2934,10 @@ class MainWindow(QMainWindow):
         ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
         t = max(0.0, self.current_time_sec())
         overlay_state = self.current_overlay_state()
+        if self.capture_state not in ("RECORDING", "PAUSED_WITHIN_POINT"):
+            derived = self.derive_overlay_state_for_position(self.input_path, t)
+            if derived is not None:
+                overlay_state = derived
         with tempfile.TemporaryDirectory(prefix="overlay-preview-") as td:
             out_png = os.path.join(td, "preview.png")
             cmd = [
@@ -3565,6 +3897,7 @@ class MainWindow(QMainWindow):
         self._sync_selected_point_index_from_id()
         self._sync_selected_point_from_timeline()
         self._sync_legacy_pending_fields()
+        self._replay_score_from_points()
         self._rebuild_segments_from_points()
         self.undo_stack.clear()
         self.refresh_segments()
@@ -3880,13 +4213,13 @@ class MainWindow(QMainWindow):
     def refresh_points_list(self) -> None:
         self.points_list.blockSignals(True)
         self.points_list.clear()
-        ordered_points = sorted(self.points, key=lambda p: p.id)
+        ordered_points = self._ordered_points()
         for idx, point in enumerate(ordered_points):
             if not point.clips:
                 continue
             first_clip = point.clips[0]
             last_clip = point.clips[-1]
-            ov = point.overlay_at_end or point.overlay_at_start or self.current_overlay_state()
+            ov = self.derive_overlay_state_before_point(point) or self.current_overlay_state()
             winner = point.winner if point.winner in ("A", "B") else "?"
             hl = "★" if point.is_highlight else ""
             row = (
@@ -3909,7 +4242,7 @@ class MainWindow(QMainWindow):
                 continue
             first_clip = point.clips[0]
             last_clip = point.clips[-1]
-            ov = point.overlay_at_start or point.overlay_at_end or self.current_overlay_state()
+            ov = self.derive_overlay_state_before_point(point) or self.current_overlay_state()
             row = (
                 f"★ Punto #{point.id}  {format_time(first_clip.start)} - {format_time(last_clip.end)}\n"
                 f"S {ov.sets_a}-{ov.sets_b}  G {ov.games_a}-{ov.games_b}  "
@@ -4344,7 +4677,7 @@ class MainWindow(QMainWindow):
             self.set_status("Impossibile assegnare il punto: nessuna clip valida registrata.")
             return
         point.winner = side
-        self._apply_point_winner_to_score(side)
+        self._replay_score_from_points()
         point.overlay_at_end = self._clone_overlay_state(self.current_overlay_state())
         self.capture_state = "IDLE"
         self.open_point_id = None
