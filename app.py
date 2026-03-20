@@ -47,6 +47,7 @@ from ui_theme import apply_app_theme
 from domain.models import MatchRuntimeState, MatchSettingsSnapshot, OverlayState, PointClip, PointRecord, Segment
 from domain.enums import CaptureState
 from domain import runtime_overlay, scoring_engine
+from domain import point_workflow
 
 APP_VERSION = "1.7.0"
 OVERLAY_SCALE_PRESETS = {
@@ -2222,18 +2223,62 @@ class MainWindow(QMainWindow):
         return OverlayState(**asdict(state))
 
     def _get_open_point_index(self) -> int | None:
-        if self.open_point_id is None:
-            return None
-        for idx, point in enumerate(self.points):
-            if point.id == self.open_point_id:
-                return idx
-        return None
+        return point_workflow.get_open_point_index(self.points, self.open_point_id)
 
     def _has_finalized_points(self) -> bool:
         return any(point.winner in ("A", "B") for point in self.points)
 
     def _ordered_points(self) -> list[PointRecord]:
-        return sorted(self.points, key=lambda point: point.id)
+        return point_workflow.ordered_points(self.points)
+
+    def _workflow_snapshot(self) -> point_workflow.WorkflowState:
+        return point_workflow.WorkflowState(
+            points=self.points,
+            selected_point_id=self.selected_point_id,
+            capture_state=self._capture_state_name(),
+            open_point_id=self.open_point_id,
+            open_clip_start=self.open_clip_start,
+            open_clip_source_path=self.open_clip_source_path,
+            next_point_id=self.next_point_id,
+        )
+
+    def _apply_workflow_state(self, wf_state: point_workflow.WorkflowState) -> None:
+        self.points = wf_state.points
+        self.selected_point_id = wf_state.selected_point_id
+        self.open_point_id = wf_state.open_point_id
+        self.open_clip_start = wf_state.open_clip_start
+        self.open_clip_source_path = wf_state.open_clip_source_path
+        self.next_point_id = wf_state.next_point_id
+        self._set_capture_state(wf_state.capture_state)
+        self._sync_selected_point_index_from_id()
+
+    def _build_source_order_and_durations(self, *, start_source: str, end_source: str) -> tuple[list[str], dict[str, float], str | None]:
+        source_order = list(self.input_paths) if self.input_paths else []
+        if not source_order:
+            source_order = [start_source]
+        elif start_source not in source_order:
+            source_order = source_order + [start_source]
+        if end_source not in source_order:
+            source_order = source_order + [end_source]
+
+        durations: dict[str, float] = {}
+        try:
+            start_idx = source_order.index(start_source)
+            end_idx = source_order.index(end_source)
+        except ValueError:
+            if start_source != end_source:
+                return source_order, durations, "Intervallo clip non valido: sorgente iniziale/finale non trovata."
+            return source_order, durations, None
+        if end_idx < start_idx:
+            return source_order, durations, "Intervallo clip non valido: la sorgente finale precede quella iniziale."
+
+        for idx in range(start_idx, end_idx):
+            src = source_order[idx]
+            duration = self._probe_clip_duration(src)
+            if duration is None:
+                return source_order, durations, f"Impossibile leggere la durata clip: {os.path.basename(src)}"
+            durations[src] = duration
+        return source_order, durations, None
 
     def _build_match_settings_snapshot(self) -> MatchSettingsSnapshot:
         return MatchSettingsSnapshot(
@@ -3650,26 +3695,20 @@ class MainWindow(QMainWindow):
             self.set_status("Seleziona il servitore iniziale per iniziare il match")
             self.update_overlay()
             return
-        if self.capture_state != "IDLE":
+        if not self._is_capture_state(CaptureState.IDLE):
             self.set_status("C'e' gia' un punto in registrazione.")
             return
         now = self.current_time_sec()
-        point = PointRecord(
-            id=self.next_point_id,
-            winner=None,
-            is_highlight=False,
-            clips=[],
-            overlay_at_start=self._clone_overlay_state(self.current_overlay_state()),
-            overlay_at_end=None,
+        res = point_workflow.start_point_session(
+            self._workflow_snapshot(),
+            now=now,
+            source_path=self.input_path,
+            overlay_at_start=self.current_overlay_state(),
         )
-        self.next_point_id += 1
-        self.points.append(point)
-        self.open_point_id = point.id
-        self.open_clip_start = now
-        self.open_clip_source_path = self.input_path
-        self._set_capture_state(CaptureState.RECORDING)
-        self.selected_point_index = len(self.points) - 1
-        self.selected_point_id = point.id
+        if not res.allowed:
+            self.set_status("C'e' gia' un punto in registrazione.")
+            return
+        self._apply_workflow_state(res.state)
         self._sync_legacy_pending_fields()
         self.update_highlight_controls()
         self._refresh_point_open_chip()
@@ -3806,29 +3845,35 @@ class MainWindow(QMainWindow):
             self.ui_shell.source_fps_label.setText("FPS: --")
 
     def _close_open_clip(self) -> bool:
-        if self.capture_state != "RECORDING":
+        if not self._is_capture_state(CaptureState.RECORDING):
             return False
         if not self.input_path or self.open_clip_start is None or not self.open_clip_source_path:
             return False
-        point_idx = self._get_open_point_index()
-        if point_idx is None:
-            return False
-        point = self.points[point_idx]
-        start_path = self.open_clip_source_path
-        end_path = self.input_path
-        created = self._append_clip_interval(
-            point=point,
-            start_source=start_path,
-            start_time=self.open_clip_start,
-            end_source=end_path,
-            end_time=self.current_time_sec(),
+        source_order, durations, err = self._build_source_order_and_durations(
+            start_source=self.open_clip_source_path,
+            end_source=self.input_path,
         )
-        if created <= 0:
-            self.set_status("Durata clip troppo corta.")
+        if err:
+            self.set_status(err)
             return False
-        self.open_clip_start = None
-        self.open_clip_source_path = None
-        self._set_capture_state(CaptureState.PAUSED_WITHIN_POINT)
+        res = point_workflow.pause_clip_session(
+            self._workflow_snapshot(),
+            now=self.current_time_sec(),
+            end_source=self.input_path,
+            source_order=source_order,
+            source_duration_map=durations,
+        )
+        if not res.allowed:
+            if res.reason == "clip_too_short":
+                self.set_status("Durata clip troppo corta.")
+            elif res.reason == "invalid_source_order":
+                self.set_status("Intervallo clip non valido: la sorgente finale precede quella iniziale.")
+            elif res.reason == "invalid_source_range":
+                self.set_status("Intervallo clip non valido: sorgente iniziale/finale non trovata.")
+            elif res.reason == "missing_duration":
+                self.set_status("Impossibile leggere la durata clip.")
+            return False
+        self._apply_workflow_state(res.state)
         self._sync_legacy_pending_fields()
         self._rebuild_segments_from_points()
         self.refresh_segments()
@@ -3861,26 +3906,28 @@ class MainWindow(QMainWindow):
     def mark_end(self) -> None:
         if not self.input_path:
             return
-        if self.capture_state == "IDLE":
+        if self._is_capture_state(CaptureState.IDLE):
             self.set_status("Segna prima un inizio punto.")
             return
-        if self.capture_state == "RECORDING":
+        if self._is_capture_state(CaptureState.RECORDING):
             if self._close_open_clip():
                 self.set_status("Clip in pausa. Premi Riprendi clip per continuare il punto.")
                 self.update_overlay()
                 self.autosave_project()
             return
         # PAUSED_WITHIN_POINT -> RECORDING
-        point_idx = self._get_open_point_index()
-        if point_idx is None:
+        res = point_workflow.resume_clip_session(
+            self._workflow_snapshot(),
+            now=self.current_time_sec(),
+            source_path=self.input_path,
+        )
+        if not res.allowed:
             self._set_capture_state(CaptureState.IDLE)
             self._sync_legacy_pending_fields()
             self.set_status("Stato punto non valido, reset a IDLE.")
             self.update_overlay()
             return
-        self.open_clip_start = self.current_time_sec()
-        self.open_clip_source_path = self.input_path
-        self._set_capture_state(CaptureState.RECORDING)
+        self._apply_workflow_state(res.state)
         self._sync_legacy_pending_fields()
         self.set_status("Clip ripresa.")
         self.update_overlay()
@@ -4178,16 +4225,14 @@ class MainWindow(QMainWindow):
             self.undo_stack.pop(0)
 
     def undo_last_action(self) -> None:
-        if self.capture_state == "IDLE":
+        if self._is_capture_state(CaptureState.IDLE):
             self.set_status("Nessun punto in corso da annullare.")
             return
-        open_idx = self._get_open_point_index()
-        if open_idx is not None:
-            del self.points[open_idx]
-        self._set_capture_state(CaptureState.IDLE)
-        self.open_point_id = None
-        self.open_clip_start = None
-        self.open_clip_source_path = None
+        res = point_workflow.cancel_open_point_session(self._workflow_snapshot())
+        if not res.allowed:
+            self.set_status("Nessun punto in corso da annullare.")
+            return
+        self._apply_workflow_state(res.state)
         self._sync_legacy_pending_fields()
         self._sync_selected_point_from_timeline()
         self._rebuild_segments_from_points()
@@ -4204,26 +4249,22 @@ class MainWindow(QMainWindow):
         if self.selected_point_index is None:
             self.set_status("Seleziona il punto da rimuovere.")
             return
-        if self.selected_point_index != len(self.points) - 1:
+        if not point_workflow.can_remove_last_point(
+            self.points, self.selected_point_id, self._capture_state_name()
+        ):
             self.set_status("E' possibile rimuovere solo l'ultimo punto.")
             return
-        removed = self.points.pop()
-        self._set_capture_state(CaptureState.IDLE)
-        self.open_point_id = None
-        self.open_clip_start = None
-        self.open_clip_source_path = None
-        if self.points:
-            self.selected_point_index = len(self.points) - 1
-            self.selected_point_id = self.points[-1].id
-        else:
-            self.selected_point_index = None
-            self.selected_point_id = None
+        res = point_workflow.remove_last_point(self._workflow_snapshot())
+        if not res.allowed:
+            self.set_status("E' possibile rimuovere solo l'ultimo punto.")
+            return
+        self._apply_workflow_state(res.state)
         self._sync_legacy_pending_fields()
         self._replay_score_from_points()
         self._rebuild_segments_from_points()
         self.refresh_segments()
         self.update_overlay()
-        self.set_status(f"Punto #{removed.id} rimosso.")
+        self.set_status(f"Punto #{res.removed_point_id} rimosso.")
         self.autosave_project()
 
     def _start_tiebreak(self, target: int, super_mode: bool) -> None:
@@ -4367,42 +4408,68 @@ class MainWindow(QMainWindow):
     def tennis_point_winner(self, side: str) -> None:
         if not self.input_path:
             return
-        if self.capture_state not in ("RECORDING", "PAUSED_WITHIN_POINT"):
+        if not self._is_capture_state(CaptureState.RECORDING, CaptureState.PAUSED_WITHIN_POINT):
             self.set_status("Avvia prima un punto con Inizio punto.")
             return
-        point_idx = self._get_open_point_index()
-        if point_idx is None:
-            self._set_capture_state(CaptureState.IDLE)
-            self._sync_legacy_pending_fields()
-            self.set_status("Stato punto non valido, reset a IDLE.")
-            self.update_overlay()
+        start_source = self.open_clip_source_path or self.input_path
+        source_order, durations, err = self._build_source_order_and_durations(
+            start_source=start_source,
+            end_source=self.input_path,
+        )
+        if err:
+            self.set_status(err)
             return
-        if self.capture_state == "RECORDING":
-            if not self._close_open_clip():
+        res = point_workflow.finalize_point_session(
+            self._workflow_snapshot(),
+            winner=side,
+            now=self.current_time_sec(),
+            end_source=self.input_path,
+            source_order=source_order,
+            source_duration_map=durations,
+        )
+        if not res.allowed:
+            if res.reason == "invalid_open_point":
+                self._set_capture_state(CaptureState.IDLE)
+                self._sync_legacy_pending_fields()
+                self.set_status("Stato punto non valido, reset a IDLE.")
+                self.update_overlay()
                 return
-            # _close_open_clip porta lo stato in PAUSED_WITHIN_POINT
-            point_idx = self._get_open_point_index()
-            if point_idx is None:
-                self.set_status("Errore interno nel completamento del punto.")
+            if res.reason in ("empty_point", "clip_too_short"):
+                self.set_status("Impossibile assegnare il punto: nessuna clip valida registrata.")
                 return
-        point = self.points[point_idx]
-        if len(point.clips) == 0:
-            self.set_status("Impossibile assegnare il punto: nessuna clip valida registrata.")
+            if res.reason in ("not_in_progress",):
+                self.set_status("Avvia prima un punto con Inizio punto.")
+                return
+            if res.reason == "invalid_source_order":
+                self.set_status("Intervallo clip non valido: la sorgente finale precede quella iniziale.")
+                return
+            if res.reason == "invalid_source_range":
+                self.set_status("Intervallo clip non valido: sorgente iniziale/finale non trovata.")
+                return
+            if res.reason == "missing_duration":
+                self.set_status("Impossibile leggere la durata clip.")
+                return
+            self.set_status("Errore interno nel completamento del punto.")
             return
-        point.winner = side
+
+        self._apply_workflow_state(res.state)
         self._replay_score_from_points()
-        point.overlay_at_end = self._clone_overlay_state(self.current_overlay_state())
-        self._set_capture_state(CaptureState.IDLE)
-        self.open_point_id = None
-        self.open_clip_start = None
-        self.open_clip_source_path = None
-        self.selected_point_index = point_idx
-        self.selected_point_id = point.id
+        finalized_id = res.finalized_point_id
+        if finalized_id is not None:
+            for idx, point in enumerate(self.points):
+                if point.id == finalized_id:
+                    point.overlay_at_end = self._clone_overlay_state(self.current_overlay_state())
+                    self.selected_point_index = idx
+                    self.selected_point_id = point.id
+                    break
         self._sync_legacy_pending_fields()
         self._rebuild_segments_from_points()
         self.refresh_segments()
         self.update_overlay()
-        self.set_status(f"Punto #{point.id} assegnato al giocatore {side}.")
+        if finalized_id is not None:
+            self.set_status(f"Punto #{finalized_id} assegnato al giocatore {side}.")
+        else:
+            self.set_status(f"Punto assegnato al giocatore {side}.")
         self.autosave_project()
 
     def reset_score(self) -> None:
