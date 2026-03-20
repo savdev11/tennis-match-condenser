@@ -6,13 +6,68 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QSplitter,
-    QTabWidget,
     QToolBar,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
+
+
+class SingleOpenAccordion(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("accordion")
+        self._sections: list[tuple[QToolButton, QWidget]] = []
+        self._active_index = -1
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+
+    def add_section(self, title: str, content: QWidget) -> int:
+        idx = len(self._sections)
+        header = QToolButton(self)
+        header.setObjectName("accordionHeader")
+        header.setCheckable(True)
+        header.setChecked(False)
+        header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        header.setAutoRaise(False)
+        header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        header.clicked.connect(lambda _checked=False, i=idx: self.set_active(i))
+        body = QFrame(self)
+        body.setObjectName("accordionBody")
+        body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        content.setParent(body)
+        body_layout.addWidget(content)
+        self._layout.addWidget(header)
+        self._layout.addWidget(body)
+        self._sections.append((header, body))
+        self._sync_header_text(idx, title, expanded=False)
+        body.setVisible(False)
+        if self._active_index < 0:
+            self.set_active(0)
+        return idx
+
+    def set_active(self, index: int) -> None:
+        if index < 0 or index >= len(self._sections):
+            return
+        for idx, (header, body) in enumerate(self._sections):
+            expanded = idx == index
+            header.setChecked(expanded)
+            body.setVisible(expanded)
+            title = str(header.property("title") or "")
+            self._sync_header_text(idx, title, expanded)
+        self._active_index = index
+
+    def _sync_header_text(self, index: int, title: str, expanded: bool) -> None:
+        arrow = "▾" if expanded else "▸"
+        header, _body = self._sections[index]
+        header.setProperty("title", title)
+        header.setText(f"{arrow}  {title}")
 
 
 class UIShell(QWidget):
@@ -74,17 +129,18 @@ class UIShell(QWidget):
         left_layout.setContentsMargins(8, 8, 8, 8)
         left_layout.setSpacing(8)
 
-        self.left_tabs = QTabWidget(self.left_rail)
-        self.left_tabs.setObjectName("leftTabs")
-        self.left_tabs.tabBar().setObjectName("leftTabBar")
-        self.left_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
-        self.left_sources_page = QFrame(self.left_tabs)
-        self.left_clips_page = QFrame(self.left_tabs)
-        self.left_highlights_page = QFrame(self.left_tabs)
-        self.left_tabs.addTab(self.left_sources_page, "Source")
-        self.left_tabs.addTab(self.left_clips_page, "Clips")
-        self.left_tabs.addTab(self.left_highlights_page, "Highlights")
-        left_layout.addWidget(self.left_tabs, 1)
+        self.left_sources_page = QFrame(self.left_rail)
+        self.left_points_page = QFrame(self.left_rail)
+        self.left_clips_page = QFrame(self.left_rail)
+        self.left_highlights_page = QFrame(self.left_rail)
+        self.left_accordion = SingleOpenAccordion(self.left_rail)
+        self.left_accordion.setObjectName("leftAccordion")
+        self.left_accordion.add_section("Sorgente", self.left_sources_page)
+        self.left_accordion.add_section("Punti", self.left_points_page)
+        self.left_accordion.add_section("Clip", self.left_clips_page)
+        self.left_accordion.add_section("Highlights", self.left_highlights_page)
+        self.left_tabs = self.left_accordion  # compatibility alias
+        left_layout.addWidget(self.left_accordion, 1)
 
         self.left_panel_container = QFrame(self.left_rail)
         self.left_panel_container.setObjectName("leftPanelContainer")
@@ -123,20 +179,20 @@ class UIShell(QWidget):
         right_layout.setContentsMargins(8, 8, 8, 8)
         right_layout.setSpacing(8)
 
-        self.right_tabs = QTabWidget(self.right_inspector)
-        self.right_tabs.setObjectName("rightTabs")
-        self.right_tabs.tabBar().setObjectName("rightTabBar")
-        self.right_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
-
-        self.right_score_page = QFrame(self.right_tabs)
-        self.right_intro_outro_page = QFrame(self.right_tabs)
-        self.right_hotkeys_page = QFrame(self.right_tabs)
-        self.right_export_page = QFrame(self.right_tabs)
-        self.right_tabs.addTab(self.right_score_page, "Score")
-        self.right_tabs.addTab(self.right_intro_outro_page, "Intro-Outro")
-        self.right_tabs.addTab(self.right_hotkeys_page, "Hotkeys")
-        self.right_tabs.addTab(self.right_export_page, "Export")
-        right_layout.addWidget(self.right_tabs, 1)
+        self.right_score_page = QFrame(self.right_inspector)
+        self.right_overlay_page = QFrame(self.right_inspector)
+        self.right_intro_outro_page = QFrame(self.right_inspector)
+        self.right_hotkeys_page = QFrame(self.right_inspector)
+        self.right_export_page = QFrame(self.right_inspector)
+        self.right_accordion = SingleOpenAccordion(self.right_inspector)
+        self.right_accordion.setObjectName("rightAccordion")
+        self.right_accordion.add_section("Punteggio", self.right_score_page)
+        self.right_accordion.add_section("Overlay", self.right_overlay_page)
+        self.right_accordion.add_section("Intro-Outro", self.right_intro_outro_page)
+        self.right_accordion.add_section("Export", self.right_export_page)
+        self.right_accordion.add_section("Hotkeys", self.right_hotkeys_page)
+        self.right_tabs = self.right_accordion  # compatibility alias
+        right_layout.addWidget(self.right_accordion, 1)
 
         self.right_panel_container = QFrame(self.right_inspector)
         self.right_panel_container.setObjectName("rightPanelContainer")
@@ -180,29 +236,28 @@ class UIShell(QWidget):
 
     def _build_actions(self) -> None:
         # Shared actions (menu + toolbar) to avoid duplicate trigger wiring.
-        self._make_action("load_video", "Load Video")
-        self._make_action("save_project", "Save Project")
-        self._make_action("mark_start", "Mark Start")
-        self._make_action("mark_end", "Mark End")
-        self._make_action("point_a", "Point A")
-        self._make_action("point_b", "Point B")
+        self._make_action("load_video", "Carica video")
+        self._make_action("save_project", "Salva progetto")
+        self._make_action("mark_start", "Inizio punto")
+        self._make_action("mark_end", "Pausa/Riprendi clip")
+        self._make_action("point_a", "Punto A")
+        self._make_action("point_b", "Punto B")
         self._make_action("undo", "Undo")
-        self._make_action("highlight", "Highlight")
+        self._make_action("highlight", "Highlights")
         self._make_action("play_pause", "Play/Pause")
         self._make_action("export", "Export")
 
         # Additional actions (for native menu wiring from MainWindow).
-        self._make_action("open_project", "Open Project")
-        self._make_action("clear_focus", "Clear Focus")
-        self._make_action("toggle_score_preview", "Preview Scoreboard")
-        self._make_action("export_highlights", "Export Highlights")
+        self._make_action("open_project", "Carica progetto")
+        self._make_action("clear_focus", "Rilascia focus")
+        self._make_action("toggle_score_preview", "Preview scoreboard")
+        self._make_action("export_highlights", "Export highlights")
         self._make_action("about", "About")
 
         for key in [
             "load_video",
+            "open_project",
             "save_project",
-            "undo",
-            "export",
         ]:
             self._add_toolbar_action(key)
 
@@ -212,6 +267,8 @@ class UIShell(QWidget):
 
         self.left_sources_page.setLayout(QVBoxLayout())
         self.left_sources_page.layout().setContentsMargins(6, 6, 6, 6)
+        self.left_points_page.setLayout(QVBoxLayout())
+        self.left_points_page.layout().setContentsMargins(6, 6, 6, 6)
         self.left_clips_page.setLayout(QVBoxLayout())
         self.left_clips_page.layout().setContentsMargins(6, 6, 6, 6)
         self.left_highlights_page.setLayout(QVBoxLayout())
@@ -219,6 +276,8 @@ class UIShell(QWidget):
 
         self.right_score_page.setLayout(QVBoxLayout())
         self.right_score_page.layout().setContentsMargins(6, 6, 6, 6)
+        self.right_overlay_page.setLayout(QVBoxLayout())
+        self.right_overlay_page.layout().setContentsMargins(6, 6, 6, 6)
         self.right_intro_outro_page.setLayout(QVBoxLayout())
         self.right_intro_outro_page.layout().setContentsMargins(6, 6, 6, 6)
         self.right_hotkeys_page.setLayout(QVBoxLayout())
