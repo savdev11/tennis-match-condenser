@@ -50,6 +50,7 @@ from domain import runtime_overlay, scoring_engine
 from domain import point_workflow
 from domain import project_io
 from domain import segment_projection
+from services import export_service
 
 APP_VERSION = "1.7.0"
 OVERLAY_SCALE_PRESETS = {
@@ -4385,42 +4386,11 @@ class MainWindow(QMainWindow):
         self.autosave_project()
 
     def _build_export_segments(self, source_segments: list[Segment]) -> list[Segment]:
-        export_corner = self.overlay_corner_combo.currentText()
-        export_scale = self.overlay_widget.scale_factor
-        export_segments: list[Segment] = []
-        for seg in source_segments:
-            export_segments.append(
-                Segment(
-                    start=seg.start,
-                    end=seg.end,
-                    source_path=seg.source_path,
-                    overlay=OverlayState(
-                        player_a=seg.overlay.player_a,
-                        player_b=seg.overlay.player_b,
-                        sets_a=seg.overlay.sets_a,
-                        sets_b=seg.overlay.sets_b,
-                        games_a=seg.overlay.games_a,
-                        games_b=seg.overlay.games_b,
-                        points_a=seg.overlay.points_a,
-                        points_b=seg.overlay.points_b,
-                        server=seg.overlay.server,
-                        tournament=seg.overlay.tournament,
-                        overlay_corner=export_corner,
-                        overlay_scale=export_scale,
-                        set_col1_a=seg.overlay.set_col1_a,
-                        set_col1_b=seg.overlay.set_col1_b,
-                        set_col2_a=seg.overlay.set_col2_a,
-                        set_col2_b=seg.overlay.set_col2_b,
-                        alert_banner=seg.overlay.alert_banner,
-                        flag_a_code=seg.overlay.flag_a_code,
-                        flag_b_code=seg.overlay.flag_b_code,
-                        flag_a_path=seg.overlay.flag_a_path,
-                        flag_b_path=seg.overlay.flag_b_path,
-                    ),
-                    is_highlight=seg.is_highlight,
-                )
-            )
-        return export_segments
+        return export_service.build_export_segments_for_render(
+            source_segments,
+            export_corner=self.overlay_corner_combo.currentText(),
+            export_scale=self.overlay_widget.scale_factor,
+        )
 
     def _start_export_job(self, output_path: str, source_segments: list[Segment], export_kind: str) -> None:
         self.current_export_kind = export_kind
@@ -4443,7 +4413,6 @@ class MainWindow(QMainWindow):
         self.export_progress_dialog.set_mode(export_kind, output_path)
         self.export_progress_dialog.set_progress(0, 0.0, 0.0, "Preparazione export...")
         self.export_progress_dialog.show()
-        export_segments = self._build_export_segments(source_segments)
         intro_cfg = None
         outro_cfg = None
         if export_kind in {"condensato", "highlights", "punto"}:
@@ -4463,12 +4432,28 @@ class MainWindow(QMainWindow):
                     self.export_progress_dialog.close()
                     self.export_progress_dialog = None
                 return
+        prepared = export_service.prepare_export_payload(
+            source_segments,
+            export_corner=self.overlay_corner_combo.currentText(),
+            export_scale=self.overlay_widget.scale_factor,
+            include_intro=self.enable_intro_checkbox.isChecked(),
+            include_outro=self.enable_outro_checkbox.isChecked(),
+            intro_cfg=intro_cfg,
+            outro_cfg=outro_cfg,
+        )
+        if prepared.error is not None:
+            self.export_btn.setEnabled(True)
+            self.update_highlight_controls()
+            if self.export_progress_dialog is not None:
+                self.export_progress_dialog.close()
+                self.export_progress_dialog = None
+            return
         self.export_worker = ExportWorker(
             output_path=output_path,
-            segments=export_segments,
+            segments=prepared.export_segments,
             include_overlay=self.include_overlay.isChecked(),
-            intro_clip=intro_cfg,
-            outro_clip=outro_cfg,
+            intro_clip=prepared.intro_clip,
+            outro_clip=prepared.outro_clip,
         )
         self.export_worker.progress.connect(self.on_export_progress)
         self.export_worker.finished_ok.connect(self.on_export_ok)
@@ -4504,7 +4489,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Errore", "Carica un video prima di esportare.")
             return
         self._rebuild_segments_from_points()
-        highlight_segments = [seg for seg in self.segments if seg.is_highlight]
+        highlight_segments = export_service.select_highlight_segments(self.segments)
         if not highlight_segments:
             QMessageBox.warning(self, "Errore", "Nessun highlight selezionato.")
             return
@@ -4533,14 +4518,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Errore", "Il punto selezionato non contiene clip valide.")
             return
         self._rebuild_segments_from_points()
-        selected_segments = [
-            seg
-            for seg in self._flatten_points_to_segments()
-            if any(
-                clip.source_path == seg.source_path and abs(clip.start - seg.start) < 1e-6 and abs(clip.end - seg.end) < 1e-6
-                for clip in point.clips
-            )
-        ]
+        selected_segments = export_service.select_segments_for_point(point, self._flatten_points_to_segments())
         if not selected_segments:
             QMessageBox.warning(self, "Errore", "Nessun segmento valido per il punto selezionato.")
             return
