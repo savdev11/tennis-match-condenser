@@ -16,7 +16,7 @@ class ExportProgressDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("exportProgressDialog")
-        self.setWindowTitle("Export")
+        self.setWindowTitle("Esportazione")
         self.setModal(True)
         self.setMinimumSize(520, 320)
         self._last_status = ""
@@ -106,13 +106,13 @@ class ExportProgressDialog(QDialog):
             mode = "punto selezionato"
         else:
             mode = export_kind
-        self.setWindowTitle("Export completato")
-        self.title_label.setText("Export completato")
+        self.setWindowTitle("Esportazione completata")
+        self.title_label.setText("Esportazione completata")
         self.status_label.setText(f"Completato: {chunks} clip ({mode})")
         self.progress_bar.setValue(100)
         self.eta_label.setText("Tempo stimato rimanente: 0:00")
         self.summary_label.setText(f"Output: {output_path}")
-        self.log_box.appendPlainText(f"Export completato: {output_path}")
+        self.log_box.appendPlainText(f"Esportazione completata: {output_path}")
         self.close_btn.setEnabled(True)
 
     def set_error(self, export_kind: str, message: str) -> None:
@@ -125,8 +125,8 @@ class ExportProgressDialog(QDialog):
             mode = "punto selezionato"
         else:
             mode = export_kind
-        self.setWindowTitle("Export fallito")
-        self.title_label.setText("Export fallito")
+        self.setWindowTitle("Esportazione fallita")
+        self.title_label.setText("Esportazione fallita")
         self.status_label.setText(f"Errore durante export {mode}")
         self.log_box.appendPlainText(message.strip() or "Errore sconosciuto")
         self.close_btn.setEnabled(True)

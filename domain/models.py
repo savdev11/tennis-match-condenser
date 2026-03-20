@@ -48,6 +48,9 @@ class PointRecord:
     winner: str | None
     is_highlight: bool
     clips: list[PointClip] = field(default_factory=list)
+    # Compatibility snapshots persisted for legacy payload continuity.
+    # Runtime scoring/server/overlay must be derived from settings + winners,
+    # never from these per-point snapshots.
     overlay_at_start: OverlayState | None = None
     overlay_at_end: OverlayState | None = None
 

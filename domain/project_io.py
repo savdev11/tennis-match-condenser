@@ -5,7 +5,7 @@ from typing import Any
 import os
 
 from domain.models import OverlayState, PointClip, PointRecord, Segment
-from domain.enums import CaptureState
+from domain.enums import CaptureState, normalize_capture_state
 
 
 @dataclass
@@ -144,6 +144,8 @@ def clip_from_dict(raw: dict[str, Any] | None, *, require_existing_source: bool 
 
 
 def point_to_dict(point: PointRecord) -> dict[str, Any]:
+    # Keep overlay_* fields serialized for backward compatibility with old
+    # project payloads. They are not authoritative runtime state.
     return {
         "id": point.id,
         "winner": point.winner,
@@ -360,12 +362,7 @@ def deserialize_project_document(data: dict[str, Any], *, require_existing_sourc
 
     next_point_id = infer_next_point_id(points, data.get("next_point_id", 1))
     selected_point_id = infer_selected_point_id(data.get("selected_point_id"), points)
-    raw_capture_state = str(data.get("capture_state", CaptureState.IDLE.value))
-    capture_state = (
-        raw_capture_state
-        if raw_capture_state in {CaptureState.IDLE.value, CaptureState.RECORDING.value, CaptureState.PAUSED_WITHIN_POINT.value}
-        else CaptureState.IDLE.value
-    )
+    capture_state = normalize_capture_state(data.get("capture_state", CaptureState.IDLE.value)).value
 
     state = _normalize_state(data.get("state", {}))
     payload_version = _to_int(data.get("version", 0), 0)
