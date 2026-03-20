@@ -48,6 +48,7 @@ from domain.models import MatchRuntimeState, MatchSettingsSnapshot, OverlayState
 from domain.enums import CaptureState
 from domain import runtime_overlay, scoring_engine
 from domain import point_workflow
+from domain import project_io
 
 APP_VERSION = "1.7.0"
 OVERLAY_SCALE_PRESETS = {
@@ -3307,29 +3308,17 @@ class MainWindow(QMainWindow):
     def _project_payload(self) -> dict:
         self._sync_legacy_pending_fields()
         self._rebuild_segments_from_points()
-        current_clip_index = self.active_clip_combo.currentIndex()
-        return {
-            "version": 4,
-            "input_paths": self.input_paths,
-            "current_clip_index": current_clip_index,
-            "pending_point_start": self.pending_point_start,
-            "pending_point_source_path": self.pending_point_source_path,
-            "next_point_id": self.next_point_id,
-            "selected_point_id": self.selected_point_id,
-            "capture_state": self.capture_state,
-            "points": [
-                {
-                    "id": point.id,
-                    "winner": point.winner,
-                    "is_highlight": point.is_highlight,
-                    "clips": [asdict(clip) for clip in point.clips],
-                    "overlay_at_start": asdict(point.overlay_at_start) if point.overlay_at_start else None,
-                    "overlay_at_end": asdict(point.overlay_at_end) if point.overlay_at_end else None,
-                }
-                for point in self.points
-            ],
-            "segments": [asdict(seg) for seg in self.segments],
-            "state": {
+        doc = project_io.ProjectDocument(
+            input_paths=list(self.input_paths),
+            current_clip_index=self.active_clip_combo.currentIndex(),
+            pending_point_start=self.pending_point_start,
+            pending_point_source_path=self.pending_point_source_path,
+            next_point_id=self.next_point_id,
+            selected_point_id=self.selected_point_id,
+            capture_state=self._capture_state_name(),
+            points=self.points,
+            segments=self.segments,
+            state={
                 "points_a": self.points_a,
                 "points_b": self.points_b,
                 "tb_points_a": self.tb_points_a,
@@ -3371,7 +3360,9 @@ class MainWindow(QMainWindow):
                 "intro_frame_ref": self.intro_frame_ref,
                 "outro_frame_ref": self.outro_frame_ref,
             },
-        }
+            version=4,
+        )
+        return project_io.serialize_project_document(doc)
 
     def save_project(self) -> None:
         output_path, _ = QFileDialog.getSaveFileName(
@@ -3436,28 +3427,21 @@ class MainWindow(QMainWindow):
             self._show_themed_error("Errore caricamento progetto", str(exc))
 
     def _load_project_data(self, data: dict, source_label: str) -> None:
-        input_paths = data.get("input_paths", [])
-        if not isinstance(input_paths, list):
-            raise ValueError("Formato progetto non valido: input_paths.")
-        existing_paths = [p for p in input_paths if isinstance(p, str) and os.path.exists(p)]
-        if not existing_paths:
-            raise ValueError("Nessun file video sorgente trovato sul disco.")
-
-        self.input_paths = existing_paths
+        loaded = project_io.deserialize_project_document(data, require_existing_source=True)
+        self.input_paths = loaded.input_paths
         self.active_clip_combo.blockSignals(True)
         self.active_clip_combo.clear()
         for idx, path in enumerate(self.input_paths, 1):
             self.active_clip_combo.addItem(f"{idx}. {os.path.basename(path)}", path)
         self.active_clip_combo.blockSignals(False)
 
-        clip_index = int(data.get("current_clip_index", 0))
-        clip_index = min(max(0, clip_index), len(self.input_paths) - 1)
+        clip_index = loaded.current_clip_index
         self.active_clip_combo.setCurrentIndex(clip_index)
         self.input_path = self.input_paths[clip_index]
         self.player.setSource(QUrl.fromLocalFile(self.input_path))
         self._update_source_fps_status(self.input_path)
 
-        state = data.get("state", {})
+        state = loaded.state
         self.points_a = int(state.get("points_a", 0))
         self.points_b = int(state.get("points_b", 0))
         self.tb_points_a = int(state.get("tb_points_a", 0))
@@ -3466,30 +3450,8 @@ class MainWindow(QMainWindow):
         self.games_b = int(state.get("games_b", 0))
         self.sets_a = int(state.get("sets_a", 0))
         self.sets_b = int(state.get("sets_b", 0))
-        raw_completed_sets = state.get("completed_sets", [])
-        parsed_completed_sets: list[tuple[int, int]] = []
-        if isinstance(raw_completed_sets, list):
-            for item in raw_completed_sets:
-                if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    try:
-                        parsed_completed_sets.append((int(item[0]), int(item[1])))
-                    except (TypeError, ValueError):
-                        continue
-        self.completed_sets = parsed_completed_sets
-        raw_tb_loser_points = state.get("completed_set_tb_loser_points", [])
-        parsed_tb_loser_points: list[int | None] = []
-        if isinstance(raw_tb_loser_points, list):
-            for item in raw_tb_loser_points:
-                if item is None:
-                    parsed_tb_loser_points.append(None)
-                else:
-                    try:
-                        parsed_tb_loser_points.append(int(item))
-                    except (TypeError, ValueError):
-                        parsed_tb_loser_points.append(None)
-        while len(parsed_tb_loser_points) < len(self.completed_sets):
-            parsed_tb_loser_points.append(None)
-        self.completed_set_tb_loser_points = parsed_tb_loser_points[: len(self.completed_sets)]
+        self.completed_sets = list(state.get("completed_sets", []))
+        self.completed_set_tb_loser_points = list(state.get("completed_set_tb_loser_points", []))
         self.in_tiebreak = bool(state.get("in_tiebreak", False))
         self.tiebreak_target = int(state.get("tiebreak_target", 7))
         self.tiebreak_super = bool(state.get("tiebreak_super", False))
@@ -3509,7 +3471,7 @@ class MainWindow(QMainWindow):
         self.best_of.setCurrentIndex(int(state.get("best_of_index", 0)))
         self.deciding_set_mode.setCurrentIndex(int(state.get("deciding_set_mode_index", 0)))
         saved_server_idx = int(state.get("server_index", 0))
-        payload_version = int(data.get("version", 0))
+        payload_version = loaded.payload_version
         if self.current_server in ("A", "B"):
             combo_server: str | None = self.current_server
         else:
@@ -3549,109 +3511,15 @@ class MainWindow(QMainWindow):
         self.games_a_input.setText(str(self.games_a))
         self.games_b_input.setText(str(self.games_b))
 
-        def _parse_overlay(raw: dict | None) -> OverlayState:
-            ov = raw or {}
-            return OverlayState(
-                player_a=str(ov.get("player_a", "Giocatore A")),
-                player_b=str(ov.get("player_b", "Giocatore B")),
-                sets_a=int(ov.get("sets_a", 0)),
-                sets_b=int(ov.get("sets_b", 0)),
-                games_a=int(ov.get("games_a", 0)),
-                games_b=int(ov.get("games_b", 0)),
-                points_a=str(ov.get("points_a", "0")),
-                points_b=str(ov.get("points_b", "0")),
-                server=str(ov.get("server", "A")),
-                tournament=str(ov.get("tournament", "Amateur Tennis Tour")),
-                overlay_corner=str(ov.get("overlay_corner", "Top Left")),
-                overlay_scale=float(ov.get("overlay_scale", 1.0)),
-                set_col1_a=str(ov.get("set_col1_a", ov.get("games_a", "0"))),
-                set_col1_b=str(ov.get("set_col1_b", ov.get("games_b", "0"))),
-                set_col2_a=str(ov.get("set_col2_a", "")),
-                set_col2_b=str(ov.get("set_col2_b", "")),
-                alert_banner=str(ov.get("alert_banner", "")),
-                flag_a_code=str(ov.get("flag_a_code", "")),
-                flag_b_code=str(ov.get("flag_b_code", "")),
-                flag_a_path=str(ov.get("flag_a_path", "")),
-                flag_b_path=str(ov.get("flag_b_path", "")),
-            )
-
-        self.points = []
-        raw_points = data.get("points", [])
-        if isinstance(raw_points, list) and raw_points:
-            for raw_point in raw_points:
-                clips: list[PointClip] = []
-                for raw_clip in raw_point.get("clips", []):
-                    src = raw_clip.get("source_path")
-                    if not src or not os.path.exists(src):
-                        continue
-                    start = float(raw_clip.get("start", 0.0))
-                    end = float(raw_clip.get("end", 0.0))
-                    if end - start <= 0:
-                        continue
-                    clips.append(PointClip(start=start, end=end, source_path=src))
-                if not clips:
-                    continue
-                raw_id = raw_point.get("id")
-                try:
-                    point_id = int(raw_id)
-                except (TypeError, ValueError):
-                    point_id = self.next_point_id
-                    self.next_point_id += 1
-                point = PointRecord(
-                    id=point_id,
-                    winner=raw_point.get("winner") if raw_point.get("winner") in ("A", "B") else None,
-                    is_highlight=bool(raw_point.get("is_highlight", False)),
-                    clips=clips,
-                    overlay_at_start=_parse_overlay(raw_point.get("overlay_at_start")),
-                    overlay_at_end=_parse_overlay(raw_point.get("overlay_at_end"))
-                    if raw_point.get("overlay_at_end") is not None
-                    else None,
-                )
-                self.points.append(point)
-        else:
-            # Legacy migration rule: 1 segment -> 1 point with one clip.
-            raw_segments = data.get("segments", [])
-            for raw_seg in raw_segments:
-                src = raw_seg.get("source_path")
-                if not src or not os.path.exists(src):
-                    continue
-                start = float(raw_seg.get("start", 0.0))
-                end = float(raw_seg.get("end", 0.0))
-                if end - start <= 0:
-                    continue
-                ov = _parse_overlay(raw_seg.get("overlay", {}))
-                point = PointRecord(
-                    id=self.next_point_id,
-                    winner=None,
-                    is_highlight=bool(raw_seg.get("is_highlight", False)),
-                    clips=[PointClip(start=start, end=end, source_path=src)],
-                    overlay_at_start=ov,
-                    overlay_at_end=None,
-                )
-                self.next_point_id += 1
-                self.points.append(point)
-
-        raw_next_point_id = data.get("next_point_id", 1)
-        try:
-            loaded_next_point_id = int(raw_next_point_id)
-        except (TypeError, ValueError):
-            loaded_next_point_id = 1
-        if self.points:
-            inferred_next = max(point.id for point in self.points) + 1
-            self.next_point_id = max(loaded_next_point_id, inferred_next)
-        else:
-            self.next_point_id = max(1, loaded_next_point_id)
+        self.points = loaded.points
+        self.next_point_id = loaded.next_point_id
 
         self._set_capture_state(CaptureState.IDLE)
         self.open_point_id = None
         self.open_clip_start = None
         self.open_clip_source_path = None
         self.initial_server_explicitly_set = True
-        selected_point_id = data.get("selected_point_id")
-        try:
-            self.selected_point_id = int(selected_point_id) if selected_point_id is not None else None
-        except (TypeError, ValueError):
-            self.selected_point_id = None
+        self.selected_point_id = loaded.selected_point_id
         self._sync_selected_point_index_from_id()
         self._sync_selected_point_from_timeline()
         self._sync_legacy_pending_fields()
