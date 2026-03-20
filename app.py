@@ -140,6 +140,15 @@ def normalize_flag_code(value: str) -> str:
     return clean[:2].upper()
 
 
+def compact_text(value: str, max_len: int = 52) -> str:
+    text = (value or "").strip()
+    if len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    return f"{text[:max_len - 3]}..."
+
+
 def detect_fontfile() -> str:
     candidates = [
         "/System/Library/Fonts/HelveticaNeue.ttc",
@@ -1209,6 +1218,7 @@ class MainWindow(QMainWindow):
         self.starting_server = "A"
         self.current_server = "A"
         self.tiebreak_first_server: str | None = None
+        self.initial_server_explicitly_set = False
         self.autosave_path = os.path.join(os.getcwd(), "autosave_tennis_project.json")
 
         self.player = QMediaPlayer()
@@ -1270,7 +1280,7 @@ class MainWindow(QMainWindow):
         self.deciding_set_mode = QComboBox()
         self.deciding_set_mode.addItems(["3° set normale", "Super tie-break a 10"])
         self.server_combo = QComboBox()
-        self.server_combo.addItems(["Servizio: A", "Servizio: B"])
+        self.server_combo.addItems(["- Seleziona servitore -", "Servizio: A", "Servizio: B"])
         self.overlay_corner_combo = QComboBox()
         self.overlay_corner_combo.addItems(["Top Left", "Top Right", "Bottom Left", "Bottom Right"])
         self.overlay_scale_combo = QComboBox()
@@ -1347,11 +1357,9 @@ class MainWindow(QMainWindow):
         self.add_last_highlight_btn.setEnabled(False)
         self.add_last_highlight_btn.clicked.connect(self.add_last_point_to_highlights)
         self.reset_score_btn = QPushButton("Reset Score")
-        self.apply_server_to_all_btn = QPushButton("Applica servitore corrente a tutti i segmenti")
         self.point_a_btn.clicked.connect(lambda: self.tennis_point_winner("A"))
         self.point_b_btn.clicked.connect(lambda: self.tennis_point_winner("B"))
         self.reset_score_btn.clicked.connect(self.reset_score)
-        self.apply_server_to_all_btn.clicked.connect(self.apply_server_to_all_segments)
         self.include_overlay = QCheckBox("Includi overlay nell'export")
         self.include_overlay.setChecked(True)
         self.preview_by_timeline = QCheckBox("Preview scoreboard da timeline")
@@ -1359,11 +1367,15 @@ class MainWindow(QMainWindow):
         self.preview_by_timeline.stateChanged.connect(self.update_overlay)
 
         self.segments_list = QListWidget()
+        self.segments_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.segments_list.currentRowChanged.connect(self.on_segment_row_changed)
         self.points_list = QListWidget()
         self.points_list.setObjectName("pointsList")
+        self.points_list.setWordWrap(True)
+        self.points_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.points_list.currentRowChanged.connect(self.on_points_list_row_changed)
         self.highlights_list = QListWidget()
+        self.highlights_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.highlights_list.currentRowChanged.connect(lambda _row: self.update_highlight_controls())
         self.highlights_list.currentRowChanged.connect(self.on_highlight_row_changed)
         self.remove_highlight_btn = QPushButton("Rimuovi highlight selezionato")
@@ -1386,6 +1398,11 @@ class MainWindow(QMainWindow):
         self.export_selected_point_btn.clicked.connect(self.export_selected_point)
         self.preview_overlay_btn = QPushButton("Preview grafica overlay")
         self.preview_overlay_btn.clicked.connect(self.preview_overlay_frame)
+        # Keep transport layout stable while labels change (e.g. Pausa/Riprendi, player names).
+        self.mark_start_btn.setFixedWidth(130)
+        self.mark_end_btn.setFixedWidth(130)
+        self.point_a_btn.setFixedWidth(120)
+        self.point_b_btn.setFixedWidth(120)
 
         self.hotkey_defaults = {
             "play_pause": "Space",
@@ -1693,7 +1710,6 @@ class MainWindow(QMainWindow):
         match_grid.addWidget(QLabel("Servizio"), 4, 0)
         match_grid.addWidget(self.server_combo, 4, 1)
         match_layout.addLayout(match_grid)
-        match_layout.addWidget(self.apply_server_to_all_btn)
         score_tab.addWidget(match_card)
         score_tab.addStretch(1)
 
@@ -1875,7 +1891,6 @@ class MainWindow(QMainWindow):
             self.open_project_btn: "secondary",
             self.save_project_btn: "secondary",
             self.reset_score_btn: "danger",
-            self.apply_server_to_all_btn: "secondary",
             self.empty_state_load_btn: "primary",
             self.remove_point_btn: "danger",
             self.export_selected_point_btn: "secondary",
@@ -2067,7 +2082,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_point_open_chip(self) -> None:
         if hasattr(self, "server_status_chip"):
-            self.server_status_chip.setText(f"Server: {self.current_server}")
+            if not self.initial_server_explicitly_set and not self._has_finalized_points():
+                self.server_status_chip.setText("Server: -")
+            else:
+                self.server_status_chip.setText(f"Server: {self.current_server}")
         self._sync_legacy_pending_fields()
         if hasattr(self, "point_open_chip"):
             if self.capture_state != "IDLE" and self.pending_point_start is not None:
@@ -2247,6 +2265,9 @@ class MainWindow(QMainWindow):
                 return idx
         return None
 
+    def _has_finalized_points(self) -> bool:
+        return any(point.winner in ("A", "B") for point in self.points)
+
     def _sync_legacy_pending_fields(self) -> None:
         if self.capture_state == "IDLE":
             self.pending_point_start = None
@@ -2424,7 +2445,8 @@ class MainWindow(QMainWindow):
         return created
 
     def _replay_score_from_points(self) -> None:
-        self.starting_server = self._server_from_combo()
+        selected_server = self._server_from_combo()
+        self.starting_server = selected_server or self.starting_server or "A"
         self.current_server = self.starting_server
         self.tiebreak_first_server = None
         self.points_a = 0
@@ -2449,12 +2471,22 @@ class MainWindow(QMainWindow):
         self.games_a_input.setText(str(self.games_a))
         self.games_b_input.setText(str(self.games_b))
 
-    def _server_from_combo(self) -> str:
-        return "A" if self.server_combo.currentIndex() == 0 else "B"
+    def _server_from_combo(self) -> str | None:
+        idx = self.server_combo.currentIndex()
+        if idx == 1:
+            return "A"
+        if idx == 2:
+            return "B"
+        return None
 
-    def _set_server_combo(self, server: str) -> None:
+    def _set_server_combo(self, server: str | None) -> None:
         self.server_combo.blockSignals(True)
-        self.server_combo.setCurrentIndex(0 if server == "A" else 1)
+        if server == "A":
+            self.server_combo.setCurrentIndex(1)
+        elif server == "B":
+            self.server_combo.setCurrentIndex(2)
+        else:
+            self.server_combo.setCurrentIndex(0)
         self.server_combo.blockSignals(False)
 
     def _opponent(self, side: str) -> str:
@@ -2463,9 +2495,16 @@ class MainWindow(QMainWindow):
     def on_server_selection_changed(self, _index: int | None = None) -> None:
         # The dropdown sets who starts serving; auto-switch logic keeps advancing it.
         selected = self._server_from_combo()
+        if selected is None:
+            self.initial_server_explicitly_set = self._has_finalized_points()
+            if not self._has_finalized_points():
+                self.set_status("Seleziona il servitore iniziale per iniziare il match")
+            self.update_overlay()
+            return
         self.starting_server = selected
         self.current_server = selected
         self.tiebreak_first_server = None
+        self.initial_server_explicitly_set = True
         self.update_overlay()
 
     def update_overlay(self) -> None:
@@ -2485,7 +2524,12 @@ class MainWindow(QMainWindow):
         self.point_a_btn.setText(f"Punto {name_a}")
         self.point_b_btn.setText(f"Punto {name_b}")
         is_idle = self.capture_state == "IDLE"
-        self.mark_start_btn.setEnabled(bool(self.input_path) and is_idle)
+        requires_server_init = not self._has_finalized_points() and not self.initial_server_explicitly_set
+        self.mark_start_btn.setEnabled(bool(self.input_path) and is_idle and not requires_server_init)
+        if requires_server_init:
+            self.mark_start_btn.setToolTip("Seleziona il servitore iniziale per iniziare il match.")
+        else:
+            self.mark_start_btn.setToolTip("")
         if self.capture_state == "RECORDING":
             self.mark_end_btn.setText("Pausa clip")
             self.mark_end_btn.setEnabled(True)
@@ -2517,8 +2561,10 @@ class MainWindow(QMainWindow):
             f"Preview {prefix}: Game {state.games_a}-{state.games_b} | Pts {state.points_a}-{state.points_b}"
         )
         if hasattr(self, "score_row_a_name"):
-            self.score_row_a_name.setText(self._short_player_name(state.player_a, "A"))
-            self.score_row_b_name.setText(self._short_player_name(state.player_b, "B"))
+            live_name_a = self.player_a_input.text().strip() or state.player_a
+            live_name_b = self.player_b_input.text().strip() or state.player_b
+            self.score_row_a_name.setText(self._short_player_name(live_name_a, "A"))
+            self.score_row_b_name.setText(self._short_player_name(live_name_b, "B"))
             self.score_row_a_set.setText(str(state.sets_a))
             self.score_row_b_set.setText(str(state.sets_b))
             self.score_row_a_game.setText(str(state.games_a))
@@ -2847,6 +2893,8 @@ class MainWindow(QMainWindow):
         self.open_point_id = None
         self.open_clip_start = None
         self.open_clip_source_path = None
+        self.initial_server_explicitly_set = False
+        self._set_server_combo(None)
         self.points.clear()
         self.selected_point_index = None
         self.selected_point_id = None
@@ -3371,9 +3419,21 @@ class MainWindow(QMainWindow):
         self.best_of.setCurrentIndex(int(state.get("best_of_index", 0)))
         self.deciding_set_mode.setCurrentIndex(int(state.get("deciding_set_mode_index", 0)))
         saved_server_idx = int(state.get("server_index", 0))
-        self._set_server_combo("A" if saved_server_idx == 0 else "B")
-        # Keep dropdown aligned with current server shown in overlay.
-        self._set_server_combo(self.current_server)
+        payload_version = int(data.get("version", 0))
+        if self.current_server in ("A", "B"):
+            combo_server: str | None = self.current_server
+        else:
+            if payload_version >= 4:
+                if saved_server_idx == 1:
+                    combo_server = "A"
+                elif saved_server_idx == 2:
+                    combo_server = "B"
+                else:
+                    combo_server = None
+            else:
+                # Legacy payloads used [A=0, B=1].
+                combo_server = "B" if saved_server_idx == 1 else "A"
+        self._set_server_combo(combo_server)
         self.overlay_corner_combo.setCurrentText(str(state.get("overlay_corner", "Top Left")))
         self._set_scale_combo_from_factor(float(state.get("overlay_scale", 1.0)))
         self.include_overlay.setChecked(bool(state.get("include_overlay", True)))
@@ -3496,6 +3556,7 @@ class MainWindow(QMainWindow):
         self.open_point_id = None
         self.open_clip_start = None
         self.open_clip_source_path = None
+        self.initial_server_explicitly_set = True
         selected_point_id = data.get("selected_point_id")
         try:
             self.selected_point_id = int(selected_point_id) if selected_point_id is not None else None
@@ -3538,6 +3599,10 @@ class MainWindow(QMainWindow):
 
     def mark_start(self) -> None:
         if not self.input_path:
+            return
+        if not self._has_finalized_points() and not self.initial_server_explicitly_set:
+            self.set_status("Seleziona il servitore iniziale per iniziare il match")
+            self.update_overlay()
             return
         if self.capture_state != "IDLE":
             self.set_status("C'e' gia' un punto in registrazione.")
@@ -3801,7 +3866,7 @@ class MainWindow(QMainWindow):
             row = (
                 f"#{idx}  {format_time(seg.start)} - {format_time(seg.end)}\n"
                 f"{badge} | {point_text} | S {seg.overlay.sets_a}-{seg.overlay.sets_b}  G {seg.overlay.games_a}-{seg.overlay.games_b}  P {score}  SRV {seg.overlay.server}\n"
-                f"{os.path.basename(seg.source_path)}"
+                f"{compact_text(os.path.basename(seg.source_path), 42)}"
             )
             item = QListWidgetItem(row)
             item.setData(Qt.ItemDataRole.UserRole, point_idx if point_idx is not None else -1)
@@ -3827,7 +3892,7 @@ class MainWindow(QMainWindow):
             row = (
                 f"Punto #{point.id} {hl}  ({winner})  {format_time(first_clip.start)} - {format_time(last_clip.end)}\n"
                 f"S {ov.sets_a}-{ov.sets_b}  G {ov.games_a}-{ov.games_b}  P {ov.points_a}-{ov.points_b}\n"
-                f"{os.path.basename(first_clip.source_path)}"
+                f"{compact_text(os.path.basename(first_clip.source_path), 42)}"
             )
             item = QListWidgetItem(row)
             item.setData(Qt.ItemDataRole.UserRole, point.id)
@@ -3849,7 +3914,7 @@ class MainWindow(QMainWindow):
                 f"★ Punto #{point.id}  {format_time(first_clip.start)} - {format_time(last_clip.end)}\n"
                 f"S {ov.sets_a}-{ov.sets_b}  G {ov.games_a}-{ov.games_b}  "
                 f"P {ov.points_a}-{ov.points_b}\n"
-                f"{os.path.basename(first_clip.source_path)}"
+                f"{compact_text(os.path.basename(first_clip.source_path), 42)}"
             )
             item = QListWidgetItem(row)
             item.setData(Qt.ItemDataRole.UserRole, point.id)
@@ -4296,9 +4361,16 @@ class MainWindow(QMainWindow):
 
     def reset_score(self) -> None:
         self.push_undo_state()
-        self.starting_server = self._server_from_combo()
-        self.current_server = self.starting_server
+        selected_server = self._server_from_combo()
+        if selected_server in ("A", "B"):
+            self.starting_server = selected_server
+            self.current_server = selected_server
+        elif not self._has_finalized_points():
+            # Internal fallback only; first point remains blocked until explicit selection.
+            self.starting_server = "A"
+            self.current_server = "A"
         self.tiebreak_first_server = None
+        self.initial_server_explicitly_set = self._has_finalized_points() or (selected_server in ("A", "B"))
         self.points_a = 0
         self.points_b = 0
         self.tb_points_a = 0

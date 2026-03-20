@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QSplitter,
     QToolBar,
     QToolButton,
@@ -22,7 +23,7 @@ class SingleOpenAccordion(QWidget):
         self._active_index = -1
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(6)
+        self._layout.setSpacing(0)
 
     def add_section(self, title: str, content: QWidget) -> int:
         idx = len(self._sections)
@@ -32,9 +33,11 @@ class SingleOpenAccordion(QWidget):
         header.setChecked(False)
         header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         header.setAutoRaise(False)
+        header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         header.clicked.connect(lambda _checked=False, i=idx: self.set_active(i))
         body = QFrame(self)
         body.setObjectName("accordionBody")
+        body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
@@ -253,9 +256,8 @@ class UIShell(QWidget):
 
         for key in [
             "load_video",
+            "open_project",
             "save_project",
-            "undo",
-            "export",
         ]:
             self._add_toolbar_action(key)
 

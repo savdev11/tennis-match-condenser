@@ -250,8 +250,8 @@ QToolButton#accordionHeader {{
     background: {bg2};
     color: {textPrimary};
     border: 1px solid {border2};
-    border-radius: 7px;
-    min-height: 28px;
+    border-radius: 0px;
+    min-height: 30px;
     padding: 4px 8px;
     font-weight: 600;
 }}
@@ -267,7 +267,7 @@ QToolButton#accordionHeader:checked {{
 QFrame#accordionBody {{
     background: transparent;
     border: none;
-    margin: 0 0 2px 0;
+    margin: 0;
 }}
 QSplitter::handle {{
     background: {bg2};
@@ -284,12 +284,13 @@ QListWidget {{
     outline: none;
     padding: 4px;
     alternate-background-color: #171717;
+    show-decoration-selected: 1;
 }}
 QListWidget::item {{
     color: {textPrimary};
     padding: 8px 9px;
     border-radius: 6px;
-    margin: 1px 0;
+    margin: 0;
 }}
 QListWidget#segmentsList::item,
 QListWidget#highlightsList::item {{
