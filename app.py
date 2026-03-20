@@ -1061,7 +1061,14 @@ class ExportProgressDialog(QDialog):
         layout.addWidget(self.close_btn, 0, Qt.AlignmentFlag.AlignRight)
 
     def set_mode(self, export_kind: str, output_path: str) -> None:
-        mode = "Condensato" if export_kind == "condensato" else "Highlights"
+        if export_kind == "condensato":
+            mode = "Condensato"
+        elif export_kind == "highlights":
+            mode = "Highlights"
+        elif export_kind == "punto":
+            mode = "Punto selezionato"
+        else:
+            mode = export_kind
         self.mode_label.setText(f"Modalita': {mode}")
         self.output_path = output_path
         self.summary_label.setText(f"Output: {output_path}")
@@ -1084,7 +1091,14 @@ class ExportProgressDialog(QDialog):
 
     def set_success(self, export_kind: str, output_path: str, chunks: int) -> None:
         self._state = "success"
-        mode = "condensato" if export_kind == "condensato" else "highlights"
+        if export_kind == "condensato":
+            mode = "condensato"
+        elif export_kind == "highlights":
+            mode = "highlights"
+        elif export_kind == "punto":
+            mode = "punto selezionato"
+        else:
+            mode = export_kind
         self.setWindowTitle("Export completato")
         self.title_label.setText("Export completato")
         self.status_label.setText(f"Completato: {chunks} clip ({mode})")
@@ -1096,7 +1110,14 @@ class ExportProgressDialog(QDialog):
 
     def set_error(self, export_kind: str, message: str) -> None:
         self._state = "error"
-        mode = "condensato" if export_kind == "condensato" else "highlights"
+        if export_kind == "condensato":
+            mode = "condensato"
+        elif export_kind == "highlights":
+            mode = "highlights"
+        elif export_kind == "punto":
+            mode = "punto selezionato"
+        else:
+            mode = export_kind
         self.setWindowTitle("Export fallito")
         self.title_label.setText("Export fallito")
         self.status_label.setText(f"Errore durante export {mode}")
@@ -1163,11 +1184,13 @@ class MainWindow(QMainWindow):
         self.open_clip_source_path: str | None = None
         self.next_point_id: int = 1
         self.clip_duration_cache: dict[str, float] = {}
+        self.source_fps_cache: dict[str, float] = {}
         self.segments: list[Segment] = []
         self.undo_stack: list[dict] = []
         self.export_worker: ExportWorker | None = None
         self.export_progress_dialog: ExportProgressDialog | None = None
         self.current_export_kind = "condensato"
+        self._ephemeral_export_frames: list[str] = []
         self.session_temp_dir = tempfile.TemporaryDirectory(prefix="tennis-session-")
 
         self.points_a = 0
@@ -1260,14 +1283,16 @@ class MainWindow(QMainWindow):
         self.use_intro_bg_for_outro = QCheckBox("Usa lo stesso frame dell'intro")
         self.intro_duration_input = QLineEdit("5")
         self.outro_duration_input = QLineEdit("5")
-        self.intro_bg_path: str | None = None
-        self.outro_bg_path: str | None = None
-        self.intro_bg_label = QLabel("Frame intro: non selezionato")
-        self.outro_bg_label = QLabel("Frame outro: non selezionato")
-        self.capture_intro_bg_btn = QPushButton("Cattura frame intro (dal tempo corrente)")
-        self.capture_outro_bg_btn = QPushButton("Cattura frame outro (dal tempo corrente)")
-        self.capture_intro_bg_btn.clicked.connect(self.capture_intro_background)
-        self.capture_outro_bg_btn.clicked.connect(self.capture_outro_background)
+        self.intro_bg_path: str | None = None  # retained for backward compatibility in loaded projects
+        self.outro_bg_path: str | None = None  # retained for backward compatibility in loaded projects
+        self.intro_frame_ref: dict | None = None
+        self.outro_frame_ref: dict | None = None
+        self.intro_bg_label = QLabel("Intro: timestamp non selezionato")
+        self.outro_bg_label = QLabel("Outro: timestamp non selezionato")
+        self.capture_intro_bg_btn = QPushButton("Usa timestamp corrente per intro")
+        self.capture_outro_bg_btn = QPushButton("Usa timestamp corrente per outro")
+        self.capture_intro_bg_btn.clicked.connect(self.set_intro_timestamp_from_current)
+        self.capture_outro_bg_btn.clicked.connect(self.set_outro_timestamp_from_current)
         self.enable_intro_checkbox.stateChanged.connect(self.on_intro_toggled)
         self.enable_outro_checkbox.stateChanged.connect(self.on_outro_toggled)
         self.use_intro_bg_for_outro.stateChanged.connect(self.on_use_intro_bg_for_outro_toggled)
@@ -1325,12 +1350,19 @@ class MainWindow(QMainWindow):
 
         self.segments_list = QListWidget()
         self.segments_list.currentRowChanged.connect(self.on_segment_row_changed)
+        self.points_list = QListWidget()
+        self.points_list.setObjectName("pointsList")
+        self.points_list.currentRowChanged.connect(self.on_points_list_row_changed)
         self.highlights_list = QListWidget()
         self.highlights_list.currentRowChanged.connect(lambda _row: self.update_highlight_controls())
         self.highlights_list.currentRowChanged.connect(self.on_highlight_row_changed)
         self.remove_highlight_btn = QPushButton("Rimuovi highlight selezionato")
         self.remove_highlight_btn.setEnabled(False)
         self.remove_highlight_btn.clicked.connect(self.remove_selected_highlight)
+        self.remove_point_btn = QPushButton("Rimuovi punto")
+        self.remove_point_btn.setProperty("btnRole", "danger")
+        self.remove_point_btn.setEnabled(False)
+        self.remove_point_btn.clicked.connect(self.remove_last_point)
         self.clear_segments_btn = QPushButton("Svuota clip")
         self.clear_segments_btn.clicked.connect(self.clear_segments)
         self.undo_btn = QPushButton("Undo")
@@ -1339,6 +1371,9 @@ class MainWindow(QMainWindow):
         self.export_btn.clicked.connect(self.export_condensed)
         self.export_highlights_btn = QPushButton("Esporta highlights")
         self.export_highlights_btn.clicked.connect(self.export_highlights)
+        self.export_selected_point_btn = QPushButton("Export punto selezionato")
+        self.export_selected_point_btn.setEnabled(False)
+        self.export_selected_point_btn.clicked.connect(self.export_selected_point)
         self.preview_overlay_btn = QPushButton("Preview grafica overlay")
         self.preview_overlay_btn.clicked.connect(self.preview_overlay_frame)
 
@@ -1457,6 +1492,7 @@ class MainWindow(QMainWindow):
         scoring_layout.setContentsMargins(6, 4, 6, 4)
         scoring_layout.setSpacing(6)
         scoring_group.setObjectName("transportGroup")
+        scoring_layout.addWidget(self.undo_btn)
         scoring_layout.addWidget(self.point_a_btn)
         scoring_layout.addWidget(self.point_b_btn)
         scoring_layout.addWidget(self.add_last_highlight_btn)
@@ -1470,7 +1506,7 @@ class MainWindow(QMainWindow):
         controls_layout.addLayout(transport_row)
         self.ui_shell.center_timeline_layout.addWidget(controls_host)
 
-        # Left rail placeholders (source / clips / highlights).
+        # Left rail: source / points / clips / highlights.
         source_panel = QFrame()
         source_panel.setObjectName("panel")
         source_controls_layout = QVBoxLayout(source_panel)
@@ -1486,6 +1522,21 @@ class MainWindow(QMainWindow):
         self.ui_shell.left_sources_page.layout().addWidget(source_panel, 0)
         self.ui_shell.left_sources_page.layout().addStretch(1)
 
+        points_panel = QFrame()
+        points_panel.setObjectName("panel")
+        points_layout = QVBoxLayout(points_panel)
+        points_layout.setContentsMargins(8, 8, 8, 8)
+        points_layout.setSpacing(8)
+        points_layout.addWidget(self.points_list, 1)
+        self.points_empty_label = QLabel("Nessun punto registrato")
+        self.points_empty_label.setObjectName("metaLabel")
+        points_layout.addWidget(self.points_empty_label)
+        points_btns = QHBoxLayout()
+        points_btns.setSpacing(6)
+        points_btns.addWidget(self.remove_point_btn)
+        points_layout.addLayout(points_btns)
+        self.ui_shell.left_points_page.layout().addWidget(points_panel, 1)
+
         clips_panel = QFrame()
         clips_panel.setObjectName("panel")
         clips_layout = QVBoxLayout(clips_panel)
@@ -1500,7 +1551,6 @@ class MainWindow(QMainWindow):
         clips_layout.addWidget(self.segments_empty_label)
         clips_btns = QHBoxLayout()
         clips_btns.setSpacing(6)
-        clips_btns.addWidget(self.undo_btn)
         clips_btns.addWidget(self.clear_segments_btn)
         clips_layout.addLayout(clips_btns)
         self.ui_shell.left_clips_page.layout().addWidget(clips_panel, 1)
@@ -1552,18 +1602,6 @@ class MainWindow(QMainWindow):
         chips_row.addWidget(self.point_open_chip)
         chips_row.addStretch(1)
         live_layout.addLayout(chips_row)
-
-        self.quick_undo_btn = QPushButton("Undo ultimo punto")
-        self.quick_undo_btn.setProperty("btnRole", "subtle")
-        self.quick_undo_btn.clicked.connect(self.undo_last_action)
-        quick_row_2 = QHBoxLayout()
-        quick_row_2.setContentsMargins(0, 0, 0, 0)
-        quick_row_2.setSpacing(6)
-        quick_row_2.addWidget(self.quick_undo_btn)
-        self.reset_score_btn.setProperty("btnRole", "danger")
-        quick_row_2.addWidget(self.reset_score_btn)
-        live_layout.addLayout(quick_row_2)
-        live_layout.addWidget(self.apply_server_to_all_btn)
 
         live_layout.addWidget(self.score_preview_label)
         score_tab.addWidget(live_card)
@@ -1620,44 +1658,29 @@ class MainWindow(QMainWindow):
         match_grid.addWidget(self.deciding_set_mode, 3, 1)
         match_grid.addWidget(QLabel("Servizio"), 4, 0)
         match_grid.addWidget(self.server_combo, 4, 1)
-        match_grid.addWidget(QLabel("Posizione overlay"), 5, 0)
-        match_grid.addWidget(self.overlay_corner_combo, 5, 1)
-        match_grid.addWidget(QLabel("Scala overlay"), 6, 0)
-        match_grid.addWidget(self.overlay_scale_combo, 6, 1)
-        match_grid.addWidget(QLabel("Set A / B"), 7, 0)
-        set_wrap = QHBoxLayout()
-        set_wrap.setContentsMargins(0, 0, 0, 0)
-        set_wrap.setSpacing(6)
-        set_wrap.addWidget(self.sets_a_input)
-        set_wrap.addWidget(self.sets_b_input)
-        set_widget = QWidget()
-        set_widget.setLayout(set_wrap)
-        match_grid.addWidget(set_widget, 7, 1)
-        match_grid.addWidget(QLabel("Game A / B"), 8, 0)
-        game_wrap = QHBoxLayout()
-        game_wrap.setContentsMargins(0, 0, 0, 0)
-        game_wrap.setSpacing(6)
-        game_wrap.addWidget(self.games_a_input)
-        game_wrap.addWidget(self.games_b_input)
-        game_widget = QWidget()
-        game_widget.setLayout(game_wrap)
-        match_grid.addWidget(game_widget, 8, 1)
         match_layout.addLayout(match_grid)
+        match_layout.addWidget(self.apply_server_to_all_btn)
         score_tab.addWidget(match_card)
+        score_tab.addStretch(1)
 
+        overlay_tab = self.ui_shell.right_overlay_page.layout()
+        overlay_tab.setSpacing(8)
         overlay_card = QFrame()
         overlay_card.setObjectName("inspectorCard")
         overlay_layout = QVBoxLayout(overlay_card)
         overlay_layout.setContentsMargins(10, 10, 10, 10)
         overlay_layout.setSpacing(8)
-        overlay_title = QLabel("Overlay / Preview")
+        overlay_title = QLabel("Overlay")
         overlay_title.setObjectName("sectionTitle")
         overlay_layout.addWidget(overlay_title)
+        overlay_layout.addWidget(QLabel("Posizione"))
+        overlay_layout.addWidget(self.overlay_corner_combo)
+        overlay_layout.addWidget(QLabel("Scala"))
+        overlay_layout.addWidget(self.overlay_scale_combo)
         overlay_layout.addWidget(self.preview_overlay_btn)
-        overlay_layout.addWidget(self.preview_by_timeline)
         overlay_layout.addWidget(self.include_overlay)
-        score_tab.addWidget(overlay_card)
-        score_tab.addStretch(1)
+        overlay_tab.addWidget(overlay_card)
+        overlay_tab.addStretch(1)
 
         intro_outro_panel = QFrame()
         intro_outro_panel.setObjectName("inspectorCard")
@@ -1727,6 +1750,7 @@ class MainWindow(QMainWindow):
         export_btn_row.setSpacing(6)
         export_btn_row.addWidget(self.export_btn)
         export_btn_row.addWidget(self.export_highlights_btn)
+        export_btn_row.addWidget(self.export_selected_point_btn)
         export_layout.addLayout(export_btn_row)
         export_layout.addWidget(self.export_length_label)
         export_layout.addWidget(QLabel("Riepilogo output"))
@@ -1797,10 +1821,11 @@ class MainWindow(QMainWindow):
             self.load_btn: "primary",
             self.open_project_btn: "secondary",
             self.save_project_btn: "secondary",
-            self.quick_undo_btn: "subtle",
             self.reset_score_btn: "danger",
             self.apply_server_to_all_btn: "secondary",
             self.empty_state_load_btn: "primary",
+            self.remove_point_btn: "danger",
+            self.export_selected_point_btn: "secondary",
         }
         for btn, role in role_map.items():
             btn.setProperty("btnRole", role)
@@ -1887,10 +1912,8 @@ class MainWindow(QMainWindow):
         self._bind_shell_action("clear_focus", getattr(self, "clear_edit_focus", None))
 
         if "toggle_score_preview" in self.ui_shell.actions:
-            self.ui_shell.actions["toggle_score_preview"].setCheckable(True)
-            self.ui_shell.actions["toggle_score_preview"].setChecked(True)
-            self.ui_shell.actions["toggle_score_preview"].setEnabled(True)
-            self.ui_shell.actions["toggle_score_preview"].triggered.connect(self.preview_by_timeline.toggle)
+            self.ui_shell.actions["toggle_score_preview"].setCheckable(False)
+            self.ui_shell.actions["toggle_score_preview"].setEnabled(False)
 
         if "point_a" in self.ui_shell.actions:
             self.ui_shell.actions["point_a"].setEnabled(True)
@@ -1914,10 +1937,10 @@ class MainWindow(QMainWindow):
             "jump_fwd_10": "Avanti 10s",
             "jump_back_30": "Indietro 30s",
             "jump_fwd_30": "Avanti 30s",
-            "mark_start": "Start Point",
-            "mark_end": "End Point",
-            "point_a": "Point A",
-            "point_b": "Point B",
+            "mark_start": "Inizio punto",
+            "mark_end": "Pausa/Riprendi clip",
+            "point_a": "Punto A",
+            "point_b": "Punto B",
             "undo": "Undo",
             "clear_focus": "Rilascia focus",
         }
@@ -2029,8 +2052,10 @@ class MainWindow(QMainWindow):
                 self.source_empty_label.setVisible(True)
         if hasattr(self, "segments_empty_label"):
             self.segments_empty_label.setVisible(len(self.segments) == 0)
+        if hasattr(self, "points_empty_label"):
+            self.points_empty_label.setVisible(len(self.points) == 0)
         if hasattr(self, "highlights_empty_label"):
-            has_highlights = any(seg.is_highlight for seg in self.segments)
+            has_highlights = any(point.is_highlight for point in self.points)
             self.highlights_empty_label.setVisible(not has_highlights)
         self._refresh_point_open_chip()
 
@@ -2226,14 +2251,17 @@ class MainWindow(QMainWindow):
         if not self.input_path:
             self.selected_point_index = None
             self.selected_point_id = None
+            self._sync_points_list_selection()
             return
         idx = self._resolve_point_selection_for_position(self.input_path, self.current_time_sec())
         if idx is None:
             self.selected_point_index = None
             self.selected_point_id = None
+            self._sync_points_list_selection()
             return
         self.selected_point_index = idx
         self.selected_point_id = self.points[idx].id
+        self._sync_points_list_selection()
 
     def _sync_selected_point_index_from_id(self) -> None:
         if self.selected_point_id is None:
@@ -2245,6 +2273,28 @@ class MainWindow(QMainWindow):
                 return
         self.selected_point_index = None
         self.selected_point_id = None
+
+    def _sync_points_list_selection(self) -> None:
+        if not hasattr(self, "points_list"):
+            return
+        self.points_list.blockSignals(True)
+        if self.selected_point_id is None:
+            self.points_list.clearSelection()
+        else:
+            found_row = -1
+            for row in range(self.points_list.count()):
+                item = self.points_list.item(row)
+                try:
+                    if int(item.data(Qt.ItemDataRole.UserRole)) == self.selected_point_id:
+                        found_row = row
+                        break
+                except (TypeError, ValueError):
+                    continue
+            if found_row >= 0:
+                self.points_list.setCurrentRow(found_row)
+            else:
+                self.points_list.clearSelection()
+        self.points_list.blockSignals(False)
 
     def _flatten_points_to_segments(self) -> list[Segment]:
         flat: list[Segment] = []
@@ -2391,30 +2441,15 @@ class MainWindow(QMainWindow):
 
     def update_score_preview_label(self) -> None:
         state = self.current_overlay_state()
-        prefix = "Corrente"
-        if self.preview_by_timeline.isChecked():
-            preview = self.overlay_state_for_current_position()
-            if preview is not None:
-                state = preview
-                prefix = "Timeline"
-            else:
-                last_state = self.last_overlay_state_for_active_clip()
-                if last_state is not None:
-                    state = last_state
-                    prefix = "Ultimo segmento"
+        prefix = "Timeline"
+        preview = self.overlay_state_for_current_position()
+        if preview is not None:
+            state = preview
         else:
-            # Se il progetto caricato non ha stato live coerente, usa almeno l'ultimo score registrato.
-            if (
-                self.segments
-                and self.points_a == 0
-                and self.points_b == 0
-                and self.tb_points_a == 0
-                and self.tb_points_b == 0
-            ):
-                last_state = self.last_overlay_state_for_active_clip()
-                if last_state is not None:
-                    state = last_state
-                    prefix = "Ultimo segmento"
+            last_state = self.last_overlay_state_for_active_clip()
+            if last_state is not None:
+                state = last_state
+                prefix = "Ultimo punto"
         self.score_preview_label.setText(
             f"Preview {prefix}: Game {state.games_a}-{state.games_b} | Pts {state.points_a}-{state.points_b}"
         )
@@ -2654,6 +2689,7 @@ class MainWindow(QMainWindow):
         self._update_time_label(self.player.position(), duration_ms)
         if self.input_path and duration_ms > 0:
             self.clip_duration_cache[self.input_path] = duration_ms / 1000.0
+            self._update_source_fps_status(self.input_path)
 
     def on_player_position_changed(self, position_ms: int) -> None:
         if not self.is_scrubbing:
@@ -2689,9 +2725,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "ui_shell"):
             self.ui_shell.export_estimate_label.setText(f"Export: {eta_txt}")
         if hasattr(self, "export_summary_label"):
-            hl_count = sum(1 for seg in self.segments if seg.is_highlight)
+            hl_count = sum(1 for point in self.points if point.is_highlight)
             self.export_summary_label.setText(
-                f"Segmenti: {len(self.segments)} | Highlights: {hl_count}"
+                f"Clip: {len(self.segments)} | Punti highlight: {hl_count}"
             )
 
     def load_videos(self) -> None:
@@ -2727,6 +2763,8 @@ class MainWindow(QMainWindow):
         self.next_point_id = 1
         self.intro_bg_path = None
         self.outro_bg_path = None
+        self.intro_frame_ref = None
+        self.outro_frame_ref = None
         self.clip_duration_cache.clear()
         self.segments.clear()
         self.undo_stack.clear()
@@ -2734,6 +2772,7 @@ class MainWindow(QMainWindow):
         self._refresh_intro_outro_labels()
         if hasattr(self, "ui_shell"):
             self.ui_shell.source_fps_label.setText("FPS: --")
+        self._update_source_fps_status(self.input_path)
         self._refresh_shell_empty_states()
         if len(self.input_paths) == 1:
             self.set_status(f"Video caricato: {self.input_paths[0]}")
@@ -2752,6 +2791,7 @@ class MainWindow(QMainWindow):
             return
         self.input_path = str(data)
         self.player.setSource(QUrl.fromLocalFile(self.input_path))
+        self._update_source_fps_status(self.input_path)
         self._sync_selected_point_from_timeline()
         self._refresh_shell_empty_states()
         if self.capture_state != "IDLE":
@@ -2762,11 +2802,45 @@ class MainWindow(QMainWindow):
             self.set_status(f"Clip attiva: {os.path.basename(self.input_path)}")
 
     def _refresh_intro_outro_labels(self) -> None:
-        intro_name = os.path.basename(self.intro_bg_path) if self.intro_bg_path else "non selezionato"
-        outro_name = os.path.basename(self.outro_bg_path) if self.outro_bg_path else "non selezionato"
-        self.intro_bg_label.setText(f"Frame intro: {intro_name}")
-        self.outro_bg_label.setText(f"Frame outro: {outro_name}")
+        if self.intro_frame_ref:
+            intro_txt = f"{os.path.basename(self.intro_frame_ref['source_path'])} @ {format_time(self.intro_frame_ref['time'])}"
+        elif self.intro_bg_path:
+            intro_txt = f"legacy frame ({os.path.basename(self.intro_bg_path)})"
+        else:
+            intro_txt = "timestamp non selezionato"
+        if self.use_intro_bg_for_outro.isChecked():
+            outro_txt = "usa stesso timestamp intro"
+        elif self.outro_frame_ref:
+            outro_txt = f"{os.path.basename(self.outro_frame_ref['source_path'])} @ {format_time(self.outro_frame_ref['time'])}"
+        elif self.outro_bg_path:
+            outro_txt = f"legacy frame ({os.path.basename(self.outro_bg_path)})"
+        else:
+            outro_txt = "timestamp non selezionato"
+        self.intro_bg_label.setText(f"Intro: {intro_txt}")
+        self.outro_bg_label.setText(f"Outro: {outro_txt}")
         self.capture_outro_bg_btn.setEnabled(not self.use_intro_bg_for_outro.isChecked())
+
+    def set_intro_timestamp_from_current(self) -> None:
+        if not self.input_path:
+            QMessageBox.warning(self, "Errore", "Carica prima un video.")
+            return
+        self.intro_frame_ref = {"source_path": self.input_path, "time": self.current_time_sec()}
+        if self.use_intro_bg_for_outro.isChecked():
+            self.outro_frame_ref = dict(self.intro_frame_ref)
+        self._refresh_intro_outro_labels()
+        self.set_status("Timestamp intro impostato dal frame corrente.")
+
+    def set_outro_timestamp_from_current(self) -> None:
+        if self.use_intro_bg_for_outro.isChecked():
+            self.outro_frame_ref = dict(self.intro_frame_ref) if self.intro_frame_ref else None
+            self._refresh_intro_outro_labels()
+            return
+        if not self.input_path:
+            QMessageBox.warning(self, "Errore", "Carica prima un video.")
+            return
+        self.outro_frame_ref = {"source_path": self.input_path, "time": self.current_time_sec()}
+        self._refresh_intro_outro_labels()
+        self.set_status("Timestamp outro impostato dal frame corrente.")
 
     def _capture_frame_to_path(self, target_name: str) -> str | None:
         if not self.input_path:
@@ -2793,26 +2867,10 @@ class MainWindow(QMainWindow):
         return out_png
 
     def capture_intro_background(self) -> None:
-        frame = self._capture_frame_to_path("intro_bg")
-        if not frame:
-            return
-        self.intro_bg_path = frame
-        if self.use_intro_bg_for_outro.isChecked():
-            self.outro_bg_path = frame
-        self._refresh_intro_outro_labels()
-        self.set_status("Frame intro aggiornato.")
+        self.set_intro_timestamp_from_current()
 
     def capture_outro_background(self) -> None:
-        if self.use_intro_bg_for_outro.isChecked():
-            self.outro_bg_path = self.intro_bg_path
-            self._refresh_intro_outro_labels()
-            return
-        frame = self._capture_frame_to_path("outro_bg")
-        if not frame:
-            return
-        self.outro_bg_path = frame
-        self._refresh_intro_outro_labels()
-        self.set_status("Frame outro aggiornato.")
+        self.set_outro_timestamp_from_current()
 
     def on_intro_toggled(self, _state: int | None = None) -> None:
         if self.enable_intro_checkbox.isChecked() and not self.intro_bg_path:
@@ -2842,8 +2900,34 @@ class MainWindow(QMainWindow):
 
     def on_use_intro_bg_for_outro_toggled(self, _state: int | None = None) -> None:
         if self.use_intro_bg_for_outro.isChecked():
-            self.outro_bg_path = self.intro_bg_path
+            self.outro_frame_ref = dict(self.intro_frame_ref) if self.intro_frame_ref else None
         self._refresh_intro_outro_labels()
+
+    def _frame_from_ref(self, ref: dict | None, target_name: str) -> str | None:
+        if not ref:
+            return None
+        src = ref.get("source_path")
+        timestamp = float(ref.get("time", 0.0))
+        if not src or not os.path.exists(src):
+            return None
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        out_png = os.path.join(self.session_temp_dir.name, f"{target_name}_{time.time_ns()}.png")
+        cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-ss",
+            f"{max(0.0, timestamp):.3f}",
+            "-i",
+            src,
+            "-frames:v",
+            "1",
+            out_png,
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0 or not os.path.exists(out_png):
+            return None
+        self._ephemeral_export_frames.append(out_png)
+        return out_png
 
     def _duration_from_input(self, field: QLineEdit, default: float = 5.0) -> float:
         try:
@@ -2855,8 +2939,11 @@ class MainWindow(QMainWindow):
     def _intro_config(self) -> dict | None:
         if not self.enable_intro_checkbox.isChecked():
             return None
-        if not self.intro_bg_path or not os.path.exists(self.intro_bg_path):
-            QMessageBox.warning(self, "Intro", "Seleziona un frame per l'intro.")
+        bg = self._frame_from_ref(self.intro_frame_ref, "intro_bg")
+        if not bg and self.intro_bg_path and os.path.exists(self.intro_bg_path):
+            bg = self.intro_bg_path
+        if not bg:
+            QMessageBox.warning(self, "Intro", "Seleziona un timestamp per l'intro.")
             return None
         player_a = self.player_a_input.text().strip() or "Giocatore A"
         player_b = self.player_b_input.text().strip() or "Giocatore B"
@@ -2870,7 +2957,7 @@ class MainWindow(QMainWindow):
             f"{player_b}{f' (#{rank_b})' if rank_b else ''}",
         ]
         return {
-            "background_path": self.intro_bg_path,
+            "background_path": bg,
             "duration": self._duration_from_input(self.intro_duration_input, 5.0),
             "lines": lines,
         }
@@ -2928,9 +3015,14 @@ class MainWindow(QMainWindow):
     def _outro_config(self) -> dict | None:
         if not self.enable_outro_checkbox.isChecked():
             return None
-        bg = self.intro_bg_path if self.use_intro_bg_for_outro.isChecked() else self.outro_bg_path
-        if not bg or not os.path.exists(bg):
-            QMessageBox.warning(self, "Outro", "Seleziona un frame per l'outro (o usa quello dell'intro).")
+        ref = self.intro_frame_ref if self.use_intro_bg_for_outro.isChecked() else self.outro_frame_ref
+        bg = self._frame_from_ref(ref, "outro_bg")
+        if not bg:
+            legacy_bg = self.intro_bg_path if self.use_intro_bg_for_outro.isChecked() else self.outro_bg_path
+            if legacy_bg and os.path.exists(legacy_bg):
+                bg = legacy_bg
+        if not bg:
+            QMessageBox.warning(self, "Outro", "Seleziona un timestamp per l'outro (o usa quello dell'intro).")
             return None
         round_name = self.round_input.text().strip() or "Round"
         lines = [
@@ -3018,6 +3110,8 @@ class MainWindow(QMainWindow):
                 "outro_duration": self.outro_duration_input.text(),
                 "intro_bg_path": self.intro_bg_path,
                 "outro_bg_path": self.outro_bg_path,
+                "intro_frame_ref": self.intro_frame_ref,
+                "outro_frame_ref": self.outro_frame_ref,
             },
         }
 
@@ -3103,6 +3197,7 @@ class MainWindow(QMainWindow):
         self.active_clip_combo.setCurrentIndex(clip_index)
         self.input_path = self.input_paths[clip_index]
         self.player.setSource(QUrl.fromLocalFile(self.input_path))
+        self._update_source_fps_status(self.input_path)
 
         state = data.get("state", {})
         self.points_a = int(state.get("points_a", 0))
@@ -3172,6 +3267,10 @@ class MainWindow(QMainWindow):
         outro_path = state.get("outro_bg_path")
         self.intro_bg_path = intro_path if isinstance(intro_path, str) and os.path.exists(intro_path) else None
         self.outro_bg_path = outro_path if isinstance(outro_path, str) and os.path.exists(outro_path) else None
+        intro_ref = state.get("intro_frame_ref")
+        outro_ref = state.get("outro_frame_ref")
+        self.intro_frame_ref = intro_ref if isinstance(intro_ref, dict) else None
+        self.outro_frame_ref = outro_ref if isinstance(outro_ref, dict) else None
         self._refresh_intro_outro_labels()
         self.sets_a_input.setText(str(self.sets_a))
         self.sets_b_input.setText(str(self.sets_b))
@@ -3394,6 +3493,23 @@ class MainWindow(QMainWindow):
             pass
         return None
 
+    def _update_source_fps_status(self, path: str | None = None) -> None:
+        if not hasattr(self, "ui_shell"):
+            return
+        src = path or self.input_path
+        if not src:
+            self.ui_shell.source_fps_label.setText("FPS: --")
+            return
+        fps = self.source_fps_cache.get(src)
+        if fps is None:
+            fps = self._probe_source_fps(src)
+            if fps:
+                self.source_fps_cache[src] = fps
+        if fps and fps > 0:
+            self.ui_shell.source_fps_label.setText(f"FPS: {fps:.2f}")
+        else:
+            self.ui_shell.source_fps_label.setText("FPS: --")
+
     def _close_open_clip(self) -> bool:
         if self.capture_state != "RECORDING":
             return False
@@ -3476,6 +3592,7 @@ class MainWindow(QMainWindow):
 
     def refresh_segments(self) -> None:
         self._rebuild_segments_from_points()
+        self.refresh_points_list()
         self.segments_list.clear()
         if not self.points:
             self.refresh_highlights_list()
@@ -3510,6 +3627,29 @@ class MainWindow(QMainWindow):
         self.update_highlight_controls()
         self.update_export_length_label()
         self._refresh_shell_empty_states()
+
+    def refresh_points_list(self) -> None:
+        self.points_list.blockSignals(True)
+        self.points_list.clear()
+        ordered_points = sorted(self.points, key=lambda p: p.id)
+        for idx, point in enumerate(ordered_points):
+            if not point.clips:
+                continue
+            first_clip = point.clips[0]
+            last_clip = point.clips[-1]
+            ov = point.overlay_at_end or point.overlay_at_start or self.current_overlay_state()
+            winner = point.winner if point.winner in ("A", "B") else "?"
+            hl = "★" if point.is_highlight else ""
+            row = (
+                f"Punto #{point.id} {hl}  ({winner})  {format_time(first_clip.start)} - {format_time(last_clip.end)}\n"
+                f"S {ov.sets_a}-{ov.sets_b}  G {ov.games_a}-{ov.games_b}  P {ov.points_a}-{ov.points_b}\n"
+                f"{os.path.basename(first_clip.source_path)}"
+            )
+            item = QListWidgetItem(row)
+            item.setData(Qt.ItemDataRole.UserRole, point.id)
+            self.points_list.addItem(item)
+        self.points_list.blockSignals(False)
+        self._sync_points_list_selection()
 
     def refresh_highlights_list(self) -> None:
         self.highlights_list.clear()
@@ -3554,6 +3694,39 @@ class MainWindow(QMainWindow):
         self.selected_point_id = self.points[idx].id
         self.update_highlight_controls()
 
+    def on_points_list_row_changed(self, _row: int) -> None:
+        item = self.points_list.currentItem()
+        if item is None:
+            self.update_highlight_controls()
+            return
+        point_id = item.data(Qt.ItemDataRole.UserRole)
+        if point_id is None:
+            self.update_highlight_controls()
+            return
+        try:
+            point_id_i = int(point_id)
+        except (TypeError, ValueError):
+            self.update_highlight_controls()
+            return
+        point_idx = next((idx for idx, point in enumerate(self.points) if point.id == point_id_i), None)
+        if point_idx is None:
+            self.update_highlight_controls()
+            return
+        point = self.points[point_idx]
+        if not point.clips:
+            self.update_highlight_controls()
+            return
+        first_clip = point.clips[0]
+        self.selected_point_index = point_idx
+        self.selected_point_id = point.id
+        self.player.pause()
+        if first_clip.source_path != self.input_path:
+            target_idx = self.active_clip_combo.findData(first_clip.source_path)
+            if target_idx >= 0:
+                self.active_clip_combo.setCurrentIndex(target_idx)
+        self.player.setPosition(int(max(0.0, first_clip.start) * 1000))
+        self.update_highlight_controls()
+
     def on_highlight_row_changed(self, _row: int) -> None:
         item = self.highlights_list.currentItem()
         if item is None:
@@ -3590,6 +3763,14 @@ class MainWindow(QMainWindow):
         self.add_last_highlight_btn.setEnabled(can_toggle)
         self.export_highlights_btn.setEnabled(any(point.is_highlight for point in self.points))
         self.remove_highlight_btn.setEnabled(self.highlights_list.currentRow() >= 0)
+        can_remove_last = (
+            selected_point is not None
+            and self.capture_state == "IDLE"
+            and len(self.points) > 0
+            and self.points[-1].id == selected_point.id
+        )
+        self.remove_point_btn.setEnabled(can_remove_last)
+        self.export_selected_point_btn.setEnabled(selected_point is not None and self.capture_state == "IDLE")
 
     def add_last_point_to_highlights(self) -> None:
         if self.capture_state != "IDLE":
@@ -4012,8 +4193,16 @@ class MainWindow(QMainWindow):
 
     def _start_export_job(self, output_path: str, source_segments: list[Segment], export_kind: str) -> None:
         self.current_export_kind = export_kind
+        for frame_path in list(self._ephemeral_export_frames):
+            try:
+                if os.path.exists(frame_path):
+                    os.remove(frame_path)
+            except OSError:
+                pass
+        self._ephemeral_export_frames.clear()
         self.export_btn.setEnabled(False)
         self.export_highlights_btn.setEnabled(False)
+        self.export_selected_point_btn.setEnabled(False)
         self.set_status(f"Export {export_kind} in corso...")
         if self.export_progress_dialog is not None:
             self.export_progress_dialog.close()
@@ -4026,7 +4215,7 @@ class MainWindow(QMainWindow):
         export_segments = self._build_export_segments(source_segments)
         intro_cfg = None
         outro_cfg = None
-        if export_kind == "condensato":
+        if export_kind in {"condensato", "highlights", "punto"}:
             intro_cfg = self._intro_config()
             if self.enable_intro_checkbox.isChecked() and intro_cfg is None:
                 self.export_btn.setEnabled(True)
@@ -4100,11 +4289,54 @@ class MainWindow(QMainWindow):
             output_path += ".mp4"
         self._start_export_job(output_path, highlight_segments, "highlights")
 
+    def export_selected_point(self) -> None:
+        if not self.input_path:
+            QMessageBox.warning(self, "Errore", "Carica un video prima di esportare.")
+            return
+        self._sync_selected_point_index_from_id()
+        if self.selected_point_index is None or self.selected_point_index >= len(self.points):
+            QMessageBox.warning(self, "Errore", "Seleziona un punto da esportare.")
+            return
+        point = self.points[self.selected_point_index]
+        if not point.clips:
+            QMessageBox.warning(self, "Errore", "Il punto selezionato non contiene clip valide.")
+            return
+        self._rebuild_segments_from_points()
+        selected_segments = [
+            seg
+            for seg in self._flatten_points_to_segments()
+            if any(
+                clip.source_path == seg.source_path and abs(clip.start - seg.start) < 1e-6 and abs(clip.end - seg.end) < 1e-6
+                for clip in point.clips
+            )
+        ]
+        if not selected_segments:
+            QMessageBox.warning(self, "Errore", "Nessun segmento valido per il punto selezionato.")
+            return
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salva punto selezionato",
+            os.path.splitext(os.path.basename(self.input_path))[0] + f"_punto_{point.id}.mp4",
+            "MP4 (*.mp4)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".mp4"):
+            output_path += ".mp4"
+        self._start_export_job(output_path, selected_segments, "punto")
+
     def on_export_progress(self, percent: int, elapsed_sec: float, eta_sec: float, status: str) -> None:
         if self.export_progress_dialog is not None:
             self.export_progress_dialog.set_progress(percent, elapsed_sec, eta_sec, status)
 
     def on_export_ok(self, output_path: str, chunks: int) -> None:
+        for frame_path in list(self._ephemeral_export_frames):
+            try:
+                if os.path.exists(frame_path):
+                    os.remove(frame_path)
+            except OSError:
+                pass
+        self._ephemeral_export_frames.clear()
         self.export_btn.setEnabled(True)
         self.update_highlight_controls()
         if self.export_progress_dialog is not None:
@@ -4112,6 +4344,13 @@ class MainWindow(QMainWindow):
         self.set_status(f"Export {self.current_export_kind} completato: {output_path} ({chunks} clip).")
 
     def on_export_failed(self, message: str) -> None:
+        for frame_path in list(self._ephemeral_export_frames):
+            try:
+                if os.path.exists(frame_path):
+                    os.remove(frame_path)
+            except OSError:
+                pass
+        self._ephemeral_export_frames.clear()
         self.export_btn.setEnabled(True)
         self.update_highlight_controls()
         if self.export_progress_dialog is not None:

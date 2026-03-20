@@ -79,10 +79,12 @@ class UIShell(QWidget):
         self.left_tabs.tabBar().setObjectName("leftTabBar")
         self.left_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
         self.left_sources_page = QFrame(self.left_tabs)
+        self.left_points_page = QFrame(self.left_tabs)
         self.left_clips_page = QFrame(self.left_tabs)
         self.left_highlights_page = QFrame(self.left_tabs)
-        self.left_tabs.addTab(self.left_sources_page, "Source")
-        self.left_tabs.addTab(self.left_clips_page, "Clips")
+        self.left_tabs.addTab(self.left_sources_page, "Sorgente")
+        self.left_tabs.addTab(self.left_points_page, "Punti")
+        self.left_tabs.addTab(self.left_clips_page, "Clip")
         self.left_tabs.addTab(self.left_highlights_page, "Highlights")
         left_layout.addWidget(self.left_tabs, 1)
 
@@ -129,10 +131,12 @@ class UIShell(QWidget):
         self.right_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
 
         self.right_score_page = QFrame(self.right_tabs)
+        self.right_overlay_page = QFrame(self.right_tabs)
         self.right_intro_outro_page = QFrame(self.right_tabs)
         self.right_hotkeys_page = QFrame(self.right_tabs)
         self.right_export_page = QFrame(self.right_tabs)
-        self.right_tabs.addTab(self.right_score_page, "Score")
+        self.right_tabs.addTab(self.right_score_page, "Punteggio")
+        self.right_tabs.addTab(self.right_overlay_page, "Overlay")
         self.right_tabs.addTab(self.right_intro_outro_page, "Intro-Outro")
         self.right_tabs.addTab(self.right_hotkeys_page, "Hotkeys")
         self.right_tabs.addTab(self.right_export_page, "Export")
@@ -180,22 +184,22 @@ class UIShell(QWidget):
 
     def _build_actions(self) -> None:
         # Shared actions (menu + toolbar) to avoid duplicate trigger wiring.
-        self._make_action("load_video", "Load Video")
-        self._make_action("save_project", "Save Project")
-        self._make_action("mark_start", "Mark Start")
-        self._make_action("mark_end", "Mark End")
-        self._make_action("point_a", "Point A")
-        self._make_action("point_b", "Point B")
+        self._make_action("load_video", "Carica video")
+        self._make_action("save_project", "Salva progetto")
+        self._make_action("mark_start", "Inizio punto")
+        self._make_action("mark_end", "Pausa/Riprendi clip")
+        self._make_action("point_a", "Punto A")
+        self._make_action("point_b", "Punto B")
         self._make_action("undo", "Undo")
-        self._make_action("highlight", "Highlight")
+        self._make_action("highlight", "Highlights")
         self._make_action("play_pause", "Play/Pause")
         self._make_action("export", "Export")
 
         # Additional actions (for native menu wiring from MainWindow).
-        self._make_action("open_project", "Open Project")
-        self._make_action("clear_focus", "Clear Focus")
-        self._make_action("toggle_score_preview", "Preview Scoreboard")
-        self._make_action("export_highlights", "Export Highlights")
+        self._make_action("open_project", "Carica progetto")
+        self._make_action("clear_focus", "Rilascia focus")
+        self._make_action("toggle_score_preview", "Preview scoreboard")
+        self._make_action("export_highlights", "Export highlights")
         self._make_action("about", "About")
 
         for key in [
@@ -212,6 +216,8 @@ class UIShell(QWidget):
 
         self.left_sources_page.setLayout(QVBoxLayout())
         self.left_sources_page.layout().setContentsMargins(6, 6, 6, 6)
+        self.left_points_page.setLayout(QVBoxLayout())
+        self.left_points_page.layout().setContentsMargins(6, 6, 6, 6)
         self.left_clips_page.setLayout(QVBoxLayout())
         self.left_clips_page.layout().setContentsMargins(6, 6, 6, 6)
         self.left_highlights_page.setLayout(QVBoxLayout())
@@ -219,6 +225,8 @@ class UIShell(QWidget):
 
         self.right_score_page.setLayout(QVBoxLayout())
         self.right_score_page.layout().setContentsMargins(6, 6, 6, 6)
+        self.right_overlay_page.setLayout(QVBoxLayout())
+        self.right_overlay_page.layout().setContentsMargins(6, 6, 6, 6)
         self.right_intro_outro_page.setLayout(QVBoxLayout())
         self.right_intro_outro_page.layout().setContentsMargins(6, 6, 6, 6)
         self.right_hotkeys_page.setLayout(QVBoxLayout())
