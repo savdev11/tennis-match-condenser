@@ -240,30 +240,34 @@ QToolBar#shellToolbar {{
     spacing: 6px;
     padding: 4px;
 }}
-QTabWidget#leftTabs::pane,
-QTabWidget#rightTabs::pane {{
+QWidget#leftAccordion,
+QWidget#rightAccordion {{
+    background: transparent;
     border: none;
-    background: {bg2};
-    border-radius: 0px;
-    margin-top: 0px;
 }}
-QTabBar#leftTabBar::tab,
-QTabBar#rightTabBar::tab {{
+QToolButton#accordionHeader {{
+    text-align: left;
     background: {bg2};
-    color: #b5aa9f;
-    border: 1px solid {border2};
-    border-bottom: 1px solid {border2};
-    border-top-left-radius: 6px;
-    border-top-right-radius: 6px;
-    min-width: 86px;
-    padding: 6px 10px;
-    margin-right: 3px;
-}}
-QTabBar#leftTabBar::tab:selected,
-QTabBar#rightTabBar::tab:selected {{
     color: {textPrimary};
+    border: 1px solid {border2};
+    border-radius: 7px;
+    min-height: 28px;
+    padding: 4px 8px;
+    font-weight: 600;
+}}
+QToolButton#accordionHeader:hover {{
     background: {bg3};
     border-color: {border3};
+}}
+QToolButton#accordionHeader:checked {{
+    background: {bg3};
+    border-color: {clayDark};
+    color: {textPrimary};
+}}
+QFrame#accordionBody {{
+    background: transparent;
+    border: none;
+    margin: 0 0 2px 0;
 }}
 QSplitter::handle {{
     background: {bg2};

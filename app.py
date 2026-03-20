@@ -1280,6 +1280,8 @@ class MainWindow(QMainWindow):
         self.active_clip_combo.currentIndexChanged.connect(self.on_active_clip_changed)
         self.enable_intro_checkbox = QCheckBox("Intro automatica")
         self.enable_outro_checkbox = QCheckBox("Outro automatica")
+        self.export_include_intro_checkbox = QCheckBox("Includi Intro")
+        self.export_include_outro_checkbox = QCheckBox("Includi Outro")
         self.use_intro_bg_for_outro = QCheckBox("Usa lo stesso frame dell'intro")
         self.intro_duration_input = QLineEdit("5")
         self.outro_duration_input = QLineEdit("5")
@@ -1287,15 +1289,23 @@ class MainWindow(QMainWindow):
         self.outro_bg_path: str | None = None  # retained for backward compatibility in loaded projects
         self.intro_frame_ref: dict | None = None
         self.outro_frame_ref: dict | None = None
-        self.intro_bg_label = QLabel("Intro: timestamp non selezionato")
-        self.outro_bg_label = QLabel("Outro: timestamp non selezionato")
-        self.capture_intro_bg_btn = QPushButton("Usa timestamp corrente per intro")
-        self.capture_outro_bg_btn = QPushButton("Usa timestamp corrente per outro")
+        self.intro_bg_label = QLabel("Intro: non impostato")
+        self.outro_bg_label = QLabel("Outro: non impostato")
+        self.capture_intro_bg_btn = QPushButton("Usa frame corrente come Intro")
+        self.capture_outro_bg_btn = QPushButton("Usa frame corrente come Outro")
+        self.clear_intro_bg_btn = QPushButton("Rimuovi Intro")
+        self.clear_outro_bg_btn = QPushButton("Rimuovi Outro")
         self.capture_intro_bg_btn.clicked.connect(self.set_intro_timestamp_from_current)
         self.capture_outro_bg_btn.clicked.connect(self.set_outro_timestamp_from_current)
+        self.clear_intro_bg_btn.clicked.connect(self.clear_intro_timestamp)
+        self.clear_outro_bg_btn.clicked.connect(self.clear_outro_timestamp)
         self.enable_intro_checkbox.stateChanged.connect(self.on_intro_toggled)
         self.enable_outro_checkbox.stateChanged.connect(self.on_outro_toggled)
+        self.export_include_intro_checkbox.stateChanged.connect(self.on_export_include_intro_toggled)
+        self.export_include_outro_checkbox.stateChanged.connect(self.on_export_include_outro_toggled)
         self.use_intro_bg_for_outro.stateChanged.connect(self.on_use_intro_bg_for_outro_toggled)
+        self.export_include_intro_checkbox.setChecked(self.enable_intro_checkbox.isChecked())
+        self.export_include_outro_checkbox.setChecked(self.enable_outro_checkbox.isChecked())
 
         self.sets_a_input = QLineEdit("0")
         self.sets_b_input = QLineEdit("0")
@@ -1587,9 +1597,33 @@ class MainWindow(QMainWindow):
         live_title.setObjectName("sectionTitle")
         live_layout.addWidget(live_title)
 
-        self.score_summary_card = QLabel("A 0-0 0 | B 0-0 0")
-        self.score_summary_card.setObjectName("summaryCard")
-        live_layout.addWidget(self.score_summary_card)
+        self.score_table_card = QFrame()
+        self.score_table_card.setObjectName("summaryCard")
+        score_table_layout = QGridLayout(self.score_table_card)
+        score_table_layout.setContentsMargins(8, 8, 8, 8)
+        score_table_layout.setHorizontalSpacing(8)
+        score_table_layout.setVerticalSpacing(4)
+        score_table_layout.addWidget(QLabel("Giocatore"), 0, 0)
+        score_table_layout.addWidget(QLabel("Set"), 0, 1)
+        score_table_layout.addWidget(QLabel("Game"), 0, 2)
+        score_table_layout.addWidget(QLabel("Punti"), 0, 3)
+        self.score_row_a_name = QLabel("Giocatore A")
+        self.score_row_b_name = QLabel("Giocatore B")
+        self.score_row_a_set = QLabel("0")
+        self.score_row_b_set = QLabel("0")
+        self.score_row_a_game = QLabel("0")
+        self.score_row_b_game = QLabel("0")
+        self.score_row_a_point = QLabel("0")
+        self.score_row_b_point = QLabel("0")
+        score_table_layout.addWidget(self.score_row_a_name, 1, 0)
+        score_table_layout.addWidget(self.score_row_a_set, 1, 1)
+        score_table_layout.addWidget(self.score_row_a_game, 1, 2)
+        score_table_layout.addWidget(self.score_row_a_point, 1, 3)
+        score_table_layout.addWidget(self.score_row_b_name, 2, 0)
+        score_table_layout.addWidget(self.score_row_b_set, 2, 1)
+        score_table_layout.addWidget(self.score_row_b_game, 2, 2)
+        score_table_layout.addWidget(self.score_row_b_point, 2, 3)
+        live_layout.addWidget(self.score_table_card)
 
         chips_row = QHBoxLayout()
         chips_row.setContentsMargins(0, 0, 0, 0)
@@ -1603,7 +1637,7 @@ class MainWindow(QMainWindow):
         chips_row.addStretch(1)
         live_layout.addLayout(chips_row)
 
-        live_layout.addWidget(self.score_preview_label)
+        self.score_preview_label.setVisible(False)
         score_tab.addWidget(live_card)
 
         players_card = QFrame()
@@ -1699,6 +1733,10 @@ class MainWindow(QMainWindow):
         shared_title.setObjectName("sectionTitle")
         shared_layout.addWidget(shared_title)
         shared_layout.addWidget(self.use_intro_bg_for_outro)
+        helper = QLabel("Il frame viene generato automaticamente in export dal timestamp selezionato.")
+        helper.setObjectName("metaLabel")
+        helper.setWordWrap(True)
+        shared_layout.addWidget(helper)
         intro_outro_layout.addWidget(shared_card)
 
         intro_card = QFrame()
@@ -1710,11 +1748,17 @@ class MainWindow(QMainWindow):
         intro_title = QLabel("Intro")
         intro_title.setObjectName("sectionTitle")
         intro_card_layout.addWidget(intro_title, 0, 0, 1, 2)
-        intro_card_layout.addWidget(self.enable_intro_checkbox, 1, 0, 1, 2)
-        intro_card_layout.addWidget(QLabel("Durata (s)"), 2, 0)
-        intro_card_layout.addWidget(self.intro_duration_input, 2, 1)
-        intro_card_layout.addWidget(self.capture_intro_bg_btn, 3, 0, 1, 2)
-        intro_card_layout.addWidget(self.intro_bg_label, 4, 0, 1, 2)
+        intro_card_layout.addWidget(QLabel("Durata (s)"), 1, 0)
+        intro_card_layout.addWidget(self.intro_duration_input, 1, 1)
+        intro_btns = QHBoxLayout()
+        intro_btns.setContentsMargins(0, 0, 0, 0)
+        intro_btns.setSpacing(6)
+        intro_btns.addWidget(self.capture_intro_bg_btn)
+        intro_btns.addWidget(self.clear_intro_bg_btn)
+        intro_btn_wrap = QWidget()
+        intro_btn_wrap.setLayout(intro_btns)
+        intro_card_layout.addWidget(intro_btn_wrap, 2, 0, 1, 2)
+        intro_card_layout.addWidget(self.intro_bg_label, 3, 0, 1, 2)
         intro_outro_layout.addWidget(intro_card)
 
         outro_card = QFrame()
@@ -1726,11 +1770,17 @@ class MainWindow(QMainWindow):
         outro_title = QLabel("Outro")
         outro_title.setObjectName("sectionTitle")
         outro_card_layout.addWidget(outro_title, 0, 0, 1, 2)
-        outro_card_layout.addWidget(self.enable_outro_checkbox, 1, 0, 1, 2)
-        outro_card_layout.addWidget(QLabel("Durata (s)"), 2, 0)
-        outro_card_layout.addWidget(self.outro_duration_input, 2, 1)
-        outro_card_layout.addWidget(self.capture_outro_bg_btn, 3, 0, 1, 2)
-        outro_card_layout.addWidget(self.outro_bg_label, 4, 0, 1, 2)
+        outro_card_layout.addWidget(QLabel("Durata (s)"), 1, 0)
+        outro_card_layout.addWidget(self.outro_duration_input, 1, 1)
+        outro_btns = QHBoxLayout()
+        outro_btns.setContentsMargins(0, 0, 0, 0)
+        outro_btns.setSpacing(6)
+        outro_btns.addWidget(self.capture_outro_bg_btn)
+        outro_btns.addWidget(self.clear_outro_bg_btn)
+        outro_btn_wrap = QWidget()
+        outro_btn_wrap.setLayout(outro_btns)
+        outro_card_layout.addWidget(outro_btn_wrap, 2, 0, 1, 2)
+        outro_card_layout.addWidget(self.outro_bg_label, 3, 0, 1, 2)
         intro_outro_layout.addWidget(outro_card)
         intro_outro_tab.addWidget(intro_outro_panel)
         intro_outro_tab.addStretch(1)
@@ -1746,16 +1796,19 @@ class MainWindow(QMainWindow):
         export_title = QLabel("Export")
         export_title.setObjectName("sectionTitle")
         export_layout.addWidget(export_title)
-        export_btn_row = QHBoxLayout()
-        export_btn_row.setSpacing(6)
-        export_btn_row.addWidget(self.export_btn)
-        export_btn_row.addWidget(self.export_highlights_btn)
-        export_btn_row.addWidget(self.export_selected_point_btn)
-        export_layout.addLayout(export_btn_row)
+        export_layout.addWidget(self.export_include_intro_checkbox)
+        export_layout.addWidget(self.export_include_outro_checkbox)
+        export_btn_col = QVBoxLayout()
+        export_btn_col.setSpacing(6)
+        export_btn_col.addWidget(self.export_btn)
+        export_btn_col.addWidget(self.export_highlights_btn)
+        export_btn_col.addWidget(self.export_selected_point_btn)
+        export_layout.addLayout(export_btn_col)
         export_layout.addWidget(self.export_length_label)
         export_layout.addWidget(QLabel("Riepilogo output"))
         self.export_summary_label = QLabel("Condensato e highlights disponibili.")
         self.export_summary_label.setObjectName("metaLabel")
+        self.export_summary_label.setWordWrap(True)
         export_layout.addWidget(self.export_summary_label)
         export_tab.addWidget(export_panel)
         export_tab.addStretch(1)
@@ -2300,7 +2353,10 @@ class MainWindow(QMainWindow):
         flat: list[Segment] = []
         ordered_points = sorted(self.points, key=lambda p: p.id)
         for point in ordered_points:
-            overlay_ref = point.overlay_at_start or point.overlay_at_end or self.current_overlay_state()
+            if point.winner in ("A", "B") and point.overlay_at_end is not None:
+                overlay_ref = point.overlay_at_end
+            else:
+                overlay_ref = point.overlay_at_start or point.overlay_at_end or self.current_overlay_state()
             for clip in point.clips:
                 if clip.end - clip.start <= 0:
                     continue
@@ -2314,6 +2370,13 @@ class MainWindow(QMainWindow):
                     )
                 )
         return flat
+
+    def _overlay_for_point_preview(self, point: PointRecord) -> OverlayState | None:
+        if point.winner in ("A", "B") and point.overlay_at_end is not None:
+            return point.overlay_at_end
+        if point.overlay_at_start is not None:
+            return point.overlay_at_start
+        return None
 
     def _rebuild_segments_from_points(self) -> None:
         self.segments = self._flatten_points_to_segments()
@@ -2453,33 +2516,41 @@ class MainWindow(QMainWindow):
         self.score_preview_label.setText(
             f"Preview {prefix}: Game {state.games_a}-{state.games_b} | Pts {state.points_a}-{state.points_b}"
         )
-        if hasattr(self, "score_summary_card"):
-            name_a = self._short_player_name(state.player_a, "A")
-            name_b = self._short_player_name(state.player_b, "B")
-            self.score_summary_card.setText(
-                f"{name_a}  S{state.sets_a} G{state.games_a} P{state.points_a}    "
-                f"{name_b}  S{state.sets_b} G{state.games_b} P{state.points_b}"
-            )
+        if hasattr(self, "score_row_a_name"):
+            self.score_row_a_name.setText(self._short_player_name(state.player_a, "A"))
+            self.score_row_b_name.setText(self._short_player_name(state.player_b, "B"))
+            self.score_row_a_set.setText(str(state.sets_a))
+            self.score_row_b_set.setText(str(state.sets_b))
+            self.score_row_a_game.setText(str(state.games_a))
+            self.score_row_b_game.setText(str(state.games_b))
+            self.score_row_a_point.setText(str(state.points_a))
+            self.score_row_b_point.setText(str(state.points_b))
         self._refresh_point_open_chip()
 
     def overlay_state_for_current_position(self) -> OverlayState | None:
-        if not self.input_path or not self.segments:
+        if not self.input_path or not self.points:
             return None
         now = self.current_time_sec()
-        matches = [s for s in self.segments if s.source_path == self.input_path and s.start <= now]
-        if not matches:
+        point_idx = self._resolve_point_selection_for_position(self.input_path, now)
+        if point_idx is None or point_idx < 0 or point_idx >= len(self.points):
             return None
-        matches.sort(key=lambda s: s.start)
-        return matches[-1].overlay
+        return self._overlay_for_point_preview(self.points[point_idx])
 
     def last_overlay_state_for_active_clip(self) -> OverlayState | None:
-        if not self.input_path or not self.segments:
+        if not self.input_path or not self.points:
             return None
-        matches = [s for s in self.segments if s.source_path == self.input_path]
-        if not matches:
+        candidate_idx = None
+        candidate_start = -1.0
+        for idx, point in enumerate(self.points):
+            bounds = self._point_source_bounds(point, self.input_path)
+            if bounds is None:
+                continue
+            if bounds[0] >= candidate_start:
+                candidate_start = bounds[0]
+                candidate_idx = idx
+        if candidate_idx is None:
             return None
-        matches.sort(key=lambda s: s.start)
-        return matches[-1].overlay
+        return self._overlay_for_point_preview(self.points[candidate_idx])
 
     def preview_overlay_frame(self) -> None:
         if not self.input_path:
@@ -2719,6 +2790,16 @@ class MainWindow(QMainWindow):
             total += max(0.0, float(seg.end) - float(seg.start))
         return total
 
+    def _selected_point_duration(self) -> float:
+        self._sync_selected_point_index_from_id()
+        if self.selected_point_index is None or self.selected_point_index >= len(self.points):
+            return 0.0
+        point = self.points[self.selected_point_index]
+        total = 0.0
+        for clip in point.clips:
+            total += max(0.0, float(clip.end) - float(clip.start))
+        return total
+
     def update_export_length_label(self) -> None:
         eta_txt = format_time(self.estimated_export_duration())
         self.export_length_label.setText(f"Durata export stimata: {eta_txt}")
@@ -2726,8 +2807,17 @@ class MainWindow(QMainWindow):
             self.ui_shell.export_estimate_label.setText(f"Export: {eta_txt}")
         if hasattr(self, "export_summary_label"):
             hl_count = sum(1 for point in self.points if point.is_highlight)
+            intro_txt = "si" if self.enable_intro_checkbox.isChecked() else "no"
+            outro_txt = "si" if self.enable_outro_checkbox.isChecked() else "no"
+            selected_txt = "nessuno"
+            selected_eta = "0:00"
+            if self.selected_point_id is not None:
+                selected_txt = f"#{self.selected_point_id}"
+                selected_eta = format_time(self._selected_point_duration())
             self.export_summary_label.setText(
-                f"Clip: {len(self.segments)} | Punti highlight: {hl_count}"
+                f"Clip: {len(self.segments)} | Punti highlight: {hl_count}\n"
+                f"Includi Intro: {intro_txt} | Includi Outro: {outro_txt}\n"
+                f"Punto selezionato: {selected_txt} (durata {selected_eta})"
             )
 
     def load_videos(self) -> None:
@@ -2807,7 +2897,7 @@ class MainWindow(QMainWindow):
         elif self.intro_bg_path:
             intro_txt = f"legacy frame ({os.path.basename(self.intro_bg_path)})"
         else:
-            intro_txt = "timestamp non selezionato"
+            intro_txt = "non impostato"
         if self.use_intro_bg_for_outro.isChecked():
             outro_txt = "usa stesso timestamp intro"
         elif self.outro_frame_ref:
@@ -2815,10 +2905,18 @@ class MainWindow(QMainWindow):
         elif self.outro_bg_path:
             outro_txt = f"legacy frame ({os.path.basename(self.outro_bg_path)})"
         else:
-            outro_txt = "timestamp non selezionato"
+            outro_txt = "non impostato"
         self.intro_bg_label.setText(f"Intro: {intro_txt}")
         self.outro_bg_label.setText(f"Outro: {outro_txt}")
         self.capture_outro_bg_btn.setEnabled(not self.use_intro_bg_for_outro.isChecked())
+        intro_set = bool(self.intro_frame_ref or self.intro_bg_path)
+        outro_set = bool(
+            self.outro_frame_ref
+            or self.outro_bg_path
+            or (self.use_intro_bg_for_outro.isChecked() and intro_set)
+        )
+        self.clear_intro_bg_btn.setEnabled(intro_set)
+        self.clear_outro_bg_btn.setEnabled(outro_set)
 
     def set_intro_timestamp_from_current(self) -> None:
         if not self.input_path:
@@ -2828,6 +2926,7 @@ class MainWindow(QMainWindow):
         if self.use_intro_bg_for_outro.isChecked():
             self.outro_frame_ref = dict(self.intro_frame_ref)
         self._refresh_intro_outro_labels()
+        self.update_export_length_label()
         self.set_status("Timestamp intro impostato dal frame corrente.")
 
     def set_outro_timestamp_from_current(self) -> None:
@@ -2840,7 +2939,27 @@ class MainWindow(QMainWindow):
             return
         self.outro_frame_ref = {"source_path": self.input_path, "time": self.current_time_sec()}
         self._refresh_intro_outro_labels()
+        self.update_export_length_label()
         self.set_status("Timestamp outro impostato dal frame corrente.")
+
+    def clear_intro_timestamp(self) -> None:
+        self.intro_frame_ref = None
+        self.intro_bg_path = None
+        if self.use_intro_bg_for_outro.isChecked():
+            self.outro_frame_ref = None
+            self.outro_bg_path = None
+        self._refresh_intro_outro_labels()
+        self.update_export_length_label()
+        self.set_status("Intro rimossa.")
+
+    def clear_outro_timestamp(self) -> None:
+        if self.use_intro_bg_for_outro.isChecked():
+            self.use_intro_bg_for_outro.setChecked(False)
+        self.outro_frame_ref = None
+        self.outro_bg_path = None
+        self._refresh_intro_outro_labels()
+        self.update_export_length_label()
+        self.set_status("Outro rimossa.")
 
     def _capture_frame_to_path(self, target_name: str) -> str | None:
         if not self.input_path:
@@ -2873,35 +2992,36 @@ class MainWindow(QMainWindow):
         self.set_outro_timestamp_from_current()
 
     def on_intro_toggled(self, _state: int | None = None) -> None:
-        if self.enable_intro_checkbox.isChecked() and not self.intro_bg_path:
-            choice = QMessageBox.question(
-                self,
-                "Frame intro",
-                "Vuoi catturare subito il frame di background per l'intro dal tempo corrente?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if choice == QMessageBox.StandardButton.Yes:
-                self.capture_intro_background()
+        self.export_include_intro_checkbox.blockSignals(True)
+        self.export_include_intro_checkbox.setChecked(self.enable_intro_checkbox.isChecked())
+        self.export_include_intro_checkbox.blockSignals(False)
         self._refresh_intro_outro_labels()
+        self.update_export_length_label()
 
     def on_outro_toggled(self, _state: int | None = None) -> None:
-        if self.enable_outro_checkbox.isChecked() and not self.use_intro_bg_for_outro.isChecked() and not self.outro_bg_path:
-            choice = QMessageBox.question(
-                self,
-                "Frame outro",
-                "Vuoi catturare subito il frame di background per l'outro dal tempo corrente?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if choice == QMessageBox.StandardButton.Yes:
-                self.capture_outro_background()
+        self.export_include_outro_checkbox.blockSignals(True)
+        self.export_include_outro_checkbox.setChecked(self.enable_outro_checkbox.isChecked())
+        self.export_include_outro_checkbox.blockSignals(False)
         self._refresh_intro_outro_labels()
+        self.update_export_length_label()
+
+    def on_export_include_intro_toggled(self, _state: int | None = None) -> None:
+        self.enable_intro_checkbox.blockSignals(True)
+        self.enable_intro_checkbox.setChecked(self.export_include_intro_checkbox.isChecked())
+        self.enable_intro_checkbox.blockSignals(False)
+        self.on_intro_toggled()
+
+    def on_export_include_outro_toggled(self, _state: int | None = None) -> None:
+        self.enable_outro_checkbox.blockSignals(True)
+        self.enable_outro_checkbox.setChecked(self.export_include_outro_checkbox.isChecked())
+        self.enable_outro_checkbox.blockSignals(False)
+        self.on_outro_toggled()
 
     def on_use_intro_bg_for_outro_toggled(self, _state: int | None = None) -> None:
         if self.use_intro_bg_for_outro.isChecked():
             self.outro_frame_ref = dict(self.intro_frame_ref) if self.intro_frame_ref else None
         self._refresh_intro_outro_labels()
+        self.update_export_length_label()
 
     def _frame_from_ref(self, ref: dict | None, target_name: str) -> str | None:
         if not ref:
@@ -3260,6 +3380,8 @@ class MainWindow(QMainWindow):
         self.preview_by_timeline.setChecked(bool(state.get("preview_by_timeline", True)))
         self.enable_intro_checkbox.setChecked(bool(state.get("enable_intro", False)))
         self.enable_outro_checkbox.setChecked(bool(state.get("enable_outro", False)))
+        self.export_include_intro_checkbox.setChecked(self.enable_intro_checkbox.isChecked())
+        self.export_include_outro_checkbox.setChecked(self.enable_outro_checkbox.isChecked())
         self.use_intro_bg_for_outro.setChecked(bool(state.get("use_intro_bg_for_outro", False)))
         self.intro_duration_input.setText(str(state.get("intro_duration", "5")))
         self.outro_duration_input.setText(str(state.get("outro_duration", "5")))
@@ -3493,6 +3615,68 @@ class MainWindow(QMainWindow):
             pass
         return None
 
+    def _probe_source_fps(self, path: str) -> float | None:
+        if not path:
+            return None
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        candidates = [os.path.join(os.path.dirname(ffmpeg_bin), "ffprobe"), "ffprobe"]
+        for ffprobe_bin in candidates:
+            try:
+                res = subprocess.run(
+                    [
+                        ffprobe_bin,
+                        "-v",
+                        "error",
+                        "-select_streams",
+                        "v:0",
+                        "-show_entries",
+                        "stream=avg_frame_rate,r_frame_rate",
+                        "-of",
+                        "default=noprint_wrappers=1:nokey=1",
+                        path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode != 0:
+                    continue
+                for line in (res.stdout or "").splitlines():
+                    fps = self._parse_fps_value(line.strip())
+                    if fps and fps > 1.0:
+                        return fps
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            res = subprocess.run([ffmpeg_bin, "-i", path], capture_output=True, text=True)
+            m = re.search(r"(\d+(?:\.\d+)?)\s*fps", res.stderr or "")
+            if m:
+                fps = float(m.group(1))
+                if fps > 1.0:
+                    return fps
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _parse_fps_value(self, raw: str) -> float | None:
+        if not raw:
+            return None
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            try:
+                n = float(num)
+                d = float(den)
+                if d == 0:
+                    return None
+                val = n / d
+                return val if val > 0 else None
+            except ValueError:
+                return None
+        try:
+            val = float(raw)
+            return val if val > 0 else None
+        except ValueError:
+            return None
+
     def _update_source_fps_status(self, path: str | None = None) -> None:
         if not hasattr(self, "ui_shell"):
             return
@@ -3693,6 +3877,7 @@ class MainWindow(QMainWindow):
         self.selected_point_index = idx
         self.selected_point_id = self.points[idx].id
         self.update_highlight_controls()
+        self.update_export_length_label()
 
     def on_points_list_row_changed(self, _row: int) -> None:
         item = self.points_list.currentItem()
@@ -3726,6 +3911,8 @@ class MainWindow(QMainWindow):
                 self.active_clip_combo.setCurrentIndex(target_idx)
         self.player.setPosition(int(max(0.0, first_clip.start) * 1000))
         self.update_highlight_controls()
+        self.update_export_length_label()
+        self.update_overlay()
 
     def on_highlight_row_changed(self, _row: int) -> None:
         item = self.highlights_list.currentItem()
@@ -3747,6 +3934,7 @@ class MainWindow(QMainWindow):
                 self.selected_point_id = point.id
                 break
         self.update_highlight_controls()
+        self.update_export_length_label()
 
     def update_highlight_controls(self) -> None:
         self._sync_selected_point_index_from_id()
