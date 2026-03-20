@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
 from ui_shell import UIShell
 from ui_theme import apply_app_theme
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 OVERLAY_SCALE_PRESETS = {
     "80%": 1.10,
     "100%": 1.35,

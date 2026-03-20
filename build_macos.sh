@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Tennis Match Condenser"
-APP_VERSION="1.6.0"
+APP_VERSION="1.7.0"
 BUNDLE_ID="com.saveriocustodi.tennismatchcondenser"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
