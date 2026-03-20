@@ -189,8 +189,8 @@ class UIShell(QWidget):
         self.right_accordion.add_section("Punteggio", self.right_score_page)
         self.right_accordion.add_section("Overlay", self.right_overlay_page)
         self.right_accordion.add_section("Intro-Outro", self.right_intro_outro_page)
-        self.right_accordion.add_section("Export", self.right_export_page)
-        self.right_accordion.add_section("Hotkeys", self.right_hotkeys_page)
+        self.right_accordion.add_section("Esportazione", self.right_export_page)
+        self.right_accordion.add_section("Scorciatoie", self.right_hotkeys_page)
         self.right_tabs = self.right_accordion  # compatibility alias
         right_layout.addWidget(self.right_accordion, 1)
 
@@ -217,13 +217,13 @@ class UIShell(QWidget):
         status_layout.setContentsMargins(8, 3, 8, 3)
         status_layout.setSpacing(10)
 
-        self.project_status_label = QLabel("Project: not loaded", self.status_container)
+        self.project_status_label = QLabel("Progetto: non caricato", self.status_container)
         self.project_status_label.setObjectName("statusValue")
         self.source_fps_label = QLabel("FPS: --", self.status_container)
         self.source_fps_label.setObjectName("statusLabel")
-        self.export_estimate_label = QLabel("Export: --", self.status_container)
+        self.export_estimate_label = QLabel("Esportazione: --", self.status_container)
         self.export_estimate_label.setObjectName("statusLabel")
-        self.hotkeys_state_label = QLabel("Hotkeys: active", self.status_container)
+        self.hotkeys_state_label = QLabel("Scorciatoie: attive", self.status_container)
         self.hotkeys_state_label.setObjectName("statusLabel")
 
         status_layout.addWidget(self.project_status_label, 2)
@@ -243,16 +243,16 @@ class UIShell(QWidget):
         self._make_action("point_a", "Punto A")
         self._make_action("point_b", "Punto B")
         self._make_action("undo", "Undo")
-        self._make_action("highlight", "Highlights")
-        self._make_action("play_pause", "Play/Pause")
-        self._make_action("export", "Export")
+        self._make_action("highlight", "Gestisci highlights")
+        self._make_action("play_pause", "Riproduci/Pausa")
+        self._make_action("export", "Esporta")
 
         # Additional actions (for native menu wiring from MainWindow).
         self._make_action("open_project", "Carica progetto")
         self._make_action("clear_focus", "Rilascia focus")
-        self._make_action("toggle_score_preview", "Preview scoreboard")
-        self._make_action("export_highlights", "Export highlights")
-        self._make_action("about", "About")
+        self._make_action("toggle_score_preview", "Anteprima punteggio")
+        self._make_action("export_highlights", "Esporta highlights")
+        self._make_action("about", "Informazioni")
 
         for key in [
             "load_video",

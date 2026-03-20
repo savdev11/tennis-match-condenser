@@ -5,15 +5,11 @@ import sys
 import tempfile
 import json
 import time
-from dataclasses import asdict, dataclass, field
-import urllib.error
-import urllib.request
-import ssl
-from typing import Literal
+from dataclasses import asdict
 
 import imageio_ffmpeg
 from PySide6.QtCore import QStandardPaths, QThread, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QFont, QPixmap, QImage
+from PySide6.QtGui import QKeySequence, QShortcut, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -31,8 +27,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -45,6 +39,16 @@ from PySide6.QtWidgets import (
 )
 from ui_shell import UIShell
 from ui_theme import apply_app_theme
+from domain.models import MatchRuntimeState, MatchSettingsSnapshot, OverlayState, PointClip, PointRecord, Segment
+from domain.enums import CaptureState, normalize_capture_state
+from domain import runtime_overlay, scoring_engine
+from domain import point_workflow
+from domain import project_io
+from domain import segment_projection
+from services import export_service
+from services import flags_service
+from ui.dialogs import ExportProgressDialog
+from ui.widgets import ScoreboardOverlayWidget, VideoOverlayContainer
 
 APP_VERSION = "1.7.0"
 OVERLAY_SCALE_PRESETS = {
@@ -54,78 +58,6 @@ OVERLAY_SCALE_PRESETS = {
     "140%": 1.80,
     "160%": 2.00,
 }
-
-
-@dataclass
-class OverlayState:
-    player_a: str
-    player_b: str
-    sets_a: int
-    sets_b: int
-    games_a: int
-    games_b: int
-    points_a: str
-    points_b: str
-    server: str
-    tournament: str
-    overlay_corner: str
-    overlay_scale: float
-    set_col1_a: str
-    set_col1_b: str
-    set_col2_a: str
-    set_col2_b: str
-    alert_banner: str
-    flag_a_code: str = ""
-    flag_b_code: str = ""
-    flag_a_path: str = ""
-    flag_b_path: str = ""
-
-
-@dataclass
-class Segment:
-    start: float
-    end: float
-    source_path: str
-    overlay: OverlayState
-    is_highlight: bool = False
-
-
-@dataclass
-class PointClip:
-    start: float
-    end: float
-    source_path: str
-
-
-@dataclass
-class PointRecord:
-    id: int
-    winner: str | None
-    is_highlight: bool
-    clips: list[PointClip] = field(default_factory=list)
-    overlay_at_start: OverlayState | None = None
-    overlay_at_end: OverlayState | None = None
-
-
-@dataclass
-class MatchRuntimeState:
-    starting_server: str
-    current_server: str
-    tiebreak_first_server: str | None
-    points_a: int
-    points_b: int
-    tb_points_a: int
-    tb_points_b: int
-    games_a: int
-    games_b: int
-    sets_a: int
-    sets_b: int
-    completed_sets: list[tuple[int, int]]
-    completed_set_tb_loser_points: list[int | None]
-    in_tiebreak: bool
-    tiebreak_target: int
-    tiebreak_super: bool
-
 
 def format_time(seconds: float) -> str:
     total = max(0, int(seconds))
@@ -406,349 +338,6 @@ def build_title_card_filter(lines: list[str]) -> str:
     return ",".join(filters)
 
 
-class VideoOverlayContainer(QWidget):
-    clicked = Signal()
-
-    def __init__(self, video_widget: QVideoWidget, overlay_widget: QWidget) -> None:
-        super().__init__()
-        self.video_widget = video_widget
-        self.overlay_widget = overlay_widget
-        self.overlay_corner = "Top Left"
-        self.video_widget.setParent(self)
-        self.overlay_widget.setParent(self)
-        self.overlay_widget.raise_()
-        self.overlay_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        self.video_widget.setGeometry(self.rect())
-        self.overlay_widget.adjustSize()
-        self.position_overlay()
-        super().resizeEvent(event)
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        self.clicked.emit()
-        self.setFocus(Qt.FocusReason.MouseFocusReason)
-        super().mousePressEvent(event)
-
-    def set_overlay_corner(self, corner: str) -> None:
-        self.overlay_corner = corner
-        self.position_overlay()
-
-    def position_overlay(self) -> None:
-        margin_x = 20
-        margin_y = 18
-        ow = self.overlay_widget.width()
-        oh = self.overlay_widget.height()
-        w = self.width()
-        h = self.height()
-        if self.overlay_corner == "Top Right":
-            x = max(0, w - ow - margin_x)
-            y = margin_y
-        elif self.overlay_corner == "Bottom Left":
-            x = margin_x
-            y = max(0, h - oh - margin_y)
-        elif self.overlay_corner == "Bottom Right":
-            x = max(0, w - ow - margin_x)
-            y = max(0, h - oh - margin_y)
-        else:
-            x = margin_x
-            y = margin_y
-        self.overlay_widget.move(x, y)
-
-
-class ScoreboardOverlayWidget(QFrame):
-    def __init__(self) -> None:
-        super().__init__()
-        self.setObjectName("scoreboard")
-        self.scale_factor = 1.0
-
-        self.root = QVBoxLayout(self)
-        self.root.setContentsMargins(0, 0, 0, 0)
-        self.root.setSpacing(0)
-        self.font_specs: dict[QLabel, tuple[int, int, str]] = {}
-
-        self.table_card = QFrame()
-        self.table_card.setObjectName("scoreboard_card")
-        self.card_layout = QVBoxLayout(self.table_card)
-        self.card_layout.setContentsMargins(0, 0, 0, 0)
-        self.card_layout.setSpacing(0)
-
-        self.alert_label = QLabel("")
-        self.alert_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._register_label(self.alert_label, 10, 800, "#173067")
-        self.alert_label.setVisible(False)
-
-        self.tournament_label = QLabel("AMATEUR TENNIS TOUR")
-        self._register_label(self.tournament_label, 13, 700, "#2f394a")
-        self.root.addWidget(self.tournament_label)
-        self.root.addWidget(self.table_card)
-        self.root.addWidget(self.alert_label)
-
-        self.grid = QGridLayout()
-        self.grid.setHorizontalSpacing(0)
-        self.grid.setVerticalSpacing(0)
-        self.card_layout.addLayout(self.grid)
-
-        self.player_a_name = QLabel("Giocatore A")
-        self.player_b_name = QLabel("Giocatore B")
-        self._register_label(self.player_a_name, 15, 700, "#1f2d3d")
-        self._register_label(self.player_b_name, 15, 700, "#1f2d3d")
-        self.player_a_name.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.player_b_name.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-
-        self.player_a_set1 = QLabel("0")
-        self.player_b_set1 = QLabel("0")
-        self.player_a_set2 = QLabel("")
-        self.player_b_set2 = QLabel("")
-        self.player_a_pts = QLabel("0")
-        self.player_b_pts = QLabel("0")
-        numeric_labels = [
-            self.player_a_set1,
-            self.player_b_set1,
-            self.player_a_set2,
-            self.player_b_set2,
-            self.player_a_pts,
-            self.player_b_pts,
-        ]
-        for label in numeric_labels:
-            self._register_label(label, 21, 800, "#1b4fd8")
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        self.flag_a_label = QLabel("")
-        self.flag_b_label = QLabel("")
-        self.flag_a_label.setFixedSize(50, 48)
-        self.flag_b_label.setFixedSize(50, 48)
-        self.flag_a_label.setScaledContents(True)
-        self.flag_b_label.setScaledContents(True)
-        self.flag_a_label.setContentsMargins(0, 0, 0, 0)
-        self.flag_b_label.setContentsMargins(0, 0, 0, 0)
-
-        self.serv_bar_a = QFrame()
-        self.serv_bar_b = QFrame()
-        self.serv_bar_a.setFixedWidth(3)
-        self.serv_bar_b.setFixedWidth(3)
-        self.row_a = QWidget()
-        self.row_b = QWidget()
-        row_a = QWidget()
-        row_a_layout = QHBoxLayout(row_a)
-        row_a_layout.setContentsMargins(0, 0, 0, 0)
-        row_a_layout.setSpacing(0)
-        row_a_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        row_a_layout.addWidget(self.serv_bar_a)
-        row_a_layout.addWidget(self.flag_a_label)
-        row_a_layout.addSpacing(6)
-        row_a_layout.addWidget(self.player_a_name)
-        row_a_layout.addStretch()
-
-        row_b = QWidget()
-        row_b_layout = QHBoxLayout(row_b)
-        row_b_layout.setContentsMargins(0, 0, 0, 0)
-        row_b_layout.setSpacing(0)
-        row_b_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        row_b_layout.addWidget(self.serv_bar_b)
-        row_b_layout.addWidget(self.flag_b_label)
-        row_b_layout.addSpacing(6)
-        row_b_layout.addWidget(self.player_b_name)
-        row_b_layout.addStretch()
-        self.row_a = row_a
-        self.row_b = row_b
-
-        self.grid.addWidget(row_a, 0, 0)
-        self.grid.addWidget(self.player_a_set1, 0, 1)
-        self.grid.addWidget(self.player_a_set2, 0, 2)
-        self.grid.addWidget(self.player_a_pts, 0, 3)
-
-        self.grid.addWidget(row_b, 1, 0)
-        self.grid.addWidget(self.player_b_set1, 1, 1)
-        self.grid.addWidget(self.player_b_set2, 1, 2)
-        self.grid.addWidget(self.player_b_pts, 1, 3)
-
-        self.apply_scale(1.0)
-
-    def _register_label(self, label: QLabel, size: int, weight: int, color: str) -> None:
-        self.font_specs[label] = (size, weight, color)
-
-    def _qt_font_weight(self, weight: int) -> QFont.Weight:
-        if weight >= 800:
-            return QFont.Weight.Black
-        if weight >= 700:
-            return QFont.Weight.Bold
-        if weight >= 600:
-            return QFont.Weight.DemiBold
-        return QFont.Weight.Normal
-
-    def apply_scale(self, factor: float) -> None:
-        self.scale_factor = max(0.7, min(factor, 2.0))
-        self.card_layout.setContentsMargins(0, 0, 0, 0)
-        self.card_layout.setSpacing(0)
-        self.root.setSpacing(0)
-        self.grid.setHorizontalSpacing(0)
-        self.grid.setVerticalSpacing(0)
-        self.grid.setColumnMinimumWidth(0, int(370 * self.scale_factor))
-        self.grid.setColumnMinimumWidth(1, int(84 * self.scale_factor))
-        self.grid.setColumnMinimumWidth(2, int(84 * self.scale_factor))
-        self.grid.setColumnMinimumWidth(3, int(84 * self.scale_factor))
-        self.grid.setColumnStretch(0, 1)
-        table_w = int((370 + 84 + 84 + 84) * self.scale_factor)
-
-        radius = int(4 * self.scale_factor)
-        self.serv_bar_a.setFixedWidth(max(4, int(6 * self.scale_factor)))
-        self.serv_bar_b.setFixedWidth(max(4, int(6 * self.scale_factor)))
-        row_h_px = int(50 * self.scale_factor)
-        flag_h_px = max(20, row_h_px)
-        self.flag_a_label.setFixedSize(int(50 * self.scale_factor), flag_h_px)
-        self.flag_b_label.setFixedSize(int(50 * self.scale_factor), flag_h_px)
-        self.tournament_label.setFixedWidth(table_w)
-        self.tournament_label.setMinimumHeight(int(28 * self.scale_factor))
-        self.tournament_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.alert_label.setStyleSheet(
-            f"background: #f8d24a; border-radius: {int(2 * self.scale_factor)}px; padding: {max(4, int(6 * self.scale_factor))}px;"
-            "color: #1e2532; font-weight: 800;"
-        )
-        self.setStyleSheet(
-            f"""
-            #scoreboard {{
-                background: transparent;
-                border: none;
-            }}
-            #scoreboard_card {{
-                background: transparent;
-                border: none;
-                border-radius: {radius}px;
-            }}
-            #scoreboard_card QLabel {{
-                padding: {max(1, int(2 * self.scale_factor))}px;
-            }}
-            """
-        )
-        row_a_style = "background: rgba(17,19,24,224); border: 1px solid #2c333d;"
-        row_b_style = "background: rgba(24,28,34,224); border: 1px solid #2c333d;"
-        self.row_a.setStyleSheet(row_a_style)
-        self.row_b.setStyleSheet(row_b_style)
-        self.row_a.setFixedHeight(row_h_px)
-        self.row_b.setFixedHeight(row_h_px)
-        self.player_a_pts.setMinimumHeight(row_h_px)
-        self.player_b_pts.setMinimumHeight(row_h_px)
-        self.alert_label.setFixedWidth(table_w)
-        self.alert_label.setMinimumHeight(int(30 * self.scale_factor))
-        self.grid.setRowMinimumHeight(0, 0)
-        self.grid.setContentsMargins(0, 0, 0, 0)
-        for label, (base_size, weight, color) in self.font_specs.items():
-            font = QFont("Helvetica Neue", max(7, int(base_size * self.scale_factor)))
-            font.setWeight(self._qt_font_weight(weight))
-            label.setFont(font)
-            label.setStyleSheet(f"color: {color};")
-        self.player_a_name.setStyleSheet("color: #ede8e0; padding: 0px; margin-top: 2px;")
-        self.player_b_name.setStyleSheet("color: #ede8e0; padding: 0px; margin-top: 2px;")
-        pad = max(2, int(2 * self.scale_factor))
-        num_cell_style = f"padding: 0px; margin: 0px; border: 1px solid #2c333d;"
-        self.player_a_set1.setStyleSheet(f"color: #5d86ff; {num_cell_style}")
-        self.player_b_set1.setStyleSheet(f"color: #5d86ff; {num_cell_style}")
-        self.player_a_set2.setStyleSheet(f"color: #5d86ff; {num_cell_style}")
-        self.player_b_set2.setStyleSheet(f"color: #5d86ff; {num_cell_style}")
-        self.player_a_pts.setStyleSheet(f"color: #ede8e0; background: #222831; padding: {pad}px; margin: 0px; border: 1px solid #2c333d;")
-        self.player_b_pts.setStyleSheet(f"color: #ede8e0; background: #222831; padding: {pad}px; margin: 0px; border: 1px solid #2c333d;")
-        self.tournament_label.setStyleSheet(
-            f"background: #8e3f1f; border: 1px solid #b5542a; border-bottom: 0px; border-radius: 0px; "
-            f"padding-left: {int(10 * self.scale_factor)}px; color: #ede8e0;"
-        )
-
-        self.setFixedWidth(int(690 * self.scale_factor))
-        self.adjustSize()
-
-    def apply_state(self, state: OverlayState) -> None:
-        self.tournament_label.setText(state.tournament.upper())
-        self.player_a_name.setText(state.player_a.upper())
-        self.player_b_name.setText(state.player_b.upper())
-        self.player_a_set1.setText(str(state.set_col1_a))
-        self.player_b_set1.setText(str(state.set_col1_b))
-        self.player_a_set2.setText(str(state.set_col2_a))
-        self.player_b_set2.setText(str(state.set_col2_b))
-        self.player_a_pts.setText(state.points_a)
-        self.player_b_pts.setText(state.points_b)
-        self.serv_bar_a.setVisible(True)
-        self.serv_bar_b.setVisible(True)
-        self.serv_bar_a.setStyleSheet(
-            "background: #d6ff3f; border-radius: 0px;" if state.server == "A" else "background: #1d2128; border-radius: 0px;"
-        )
-        self.serv_bar_b.setStyleSheet(
-            "background: #d6ff3f; border-radius: 0px;" if state.server == "B" else "background: #1d2128; border-radius: 0px;"
-        )
-        self.row_a.setStyleSheet("background: rgba(17,19,24,224); border: 1px solid #2c333d;")
-        self.row_b.setStyleSheet("background: rgba(24,28,34,224); border: 1px solid #2c333d;")
-        self.alert_label.setVisible(bool(state.alert_banner))
-        self.alert_label.setText(state.alert_banner)
-        self._apply_flag_pixmap(self.flag_a_label, state.flag_a_path)
-        self._apply_flag_pixmap(self.flag_b_label, state.flag_b_path)
-
-    def _apply_flag_pixmap(self, target: QLabel, flag_path: str) -> None:
-        if not flag_path or not os.path.exists(flag_path):
-            target.clear()
-            target.setStyleSheet("background: #1d2128; border: none;")
-            return
-        pix = QPixmap(flag_path)
-        if pix.isNull():
-            target.clear()
-            target.setStyleSheet("background: #1d2128; border: none;")
-            return
-        target.setStyleSheet("border: none;")
-        target.setPixmap(self._center_crop_pixmap(pix, target.width(), target.height()))
-
-    def _center_crop_pixmap(self, pix: QPixmap, target_w: int, target_h: int) -> QPixmap:
-        if target_w <= 0 or target_h <= 0 or pix.isNull():
-            return pix
-        src = pix
-        # Trim transparent borders if present (some flag assets include transparent padding).
-        img = src.toImage().convertToFormat(QImage.Format.Format_ARGB32)
-        bbox = self._non_transparent_bbox(img)
-        if bbox is not None:
-            src = QPixmap.fromImage(img.copy(*bbox))
-        sw = src.width()
-        sh = src.height()
-        if sw <= 0 or sh <= 0:
-            return pix
-        target_ratio = target_w / target_h
-        src_ratio = sw / sh
-        if src_ratio > target_ratio:
-            scaled_h = target_h
-            scaled_w = int(round(scaled_h * src_ratio))
-        else:
-            scaled_w = target_w
-            scaled_h = int(round(scaled_w / src_ratio))
-        scaled = src.scaled(
-            max(1, scaled_w),
-            max(1, scaled_h),
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        x = max(0, int((scaled.width() - target_w) / 2))
-        y = max(0, int((scaled.height() - target_h) / 2))
-        return scaled.copy(x, y, target_w, target_h)
-
-    def _non_transparent_bbox(self, image: QImage) -> tuple[int, int, int, int] | None:
-        w = image.width()
-        h = image.height()
-        min_x = w
-        min_y = h
-        max_x = -1
-        max_y = -1
-        for y in range(h):
-            for x in range(w):
-                if image.pixelColor(x, y).alpha() > 0:
-                    if x < min_x:
-                        min_x = x
-                    if y < min_y:
-                        min_y = y
-                    if x > max_x:
-                        max_x = x
-                    if y > max_y:
-                        max_y = y
-        if max_x < min_x or max_y < min_y:
-            return None
-        return (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
-
-
 class ExportWorker(QThread):
     finished_ok = Signal(str, int)
     failed = Signal(str)
@@ -912,7 +501,7 @@ class ExportWorker(QThread):
                     ]
                 )
                 elapsed = max(0.0, time.monotonic() - started_at)
-                self.progress.emit(100, elapsed, 0.0, "Export completato.")
+                self.progress.emit(100, elapsed, 0.0, "Esportazione completata.")
                 self.finished_ok.emit(self.output_path, len(chunk_paths))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
@@ -1034,162 +623,17 @@ class ExportWorker(QThread):
             return None
 
 
-class ExportProgressDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("exportProgressDialog")
-        self.setWindowTitle("Export")
-        self.setModal(True)
-        self.setMinimumSize(520, 320)
-        self._last_status = ""
-        self._state = "idle"
-        self.output_path = ""
+class FlagDownloadWorker(QThread):
+    finished_with_result = Signal(object)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(8)
+    def __init__(self, codes: list[str], cache_dir: str) -> None:
+        super().__init__()
+        self.codes = list(codes)
+        self.cache_dir = cache_dir
 
-        self.title_label = QLabel("Esportazione in corso")
-        self.title_label.setObjectName("dialogTitle")
-        self.mode_label = QLabel("Modalita': --")
-        self.mode_label.setObjectName("metaLabel")
-        self.status_label = QLabel("Preparazione export...")
-        self.status_label.setObjectName("statusValue")
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setObjectName("exportProgressBar")
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.elapsed_label = QLabel("Tempo trascorso: 0:00")
-        self.elapsed_label.setObjectName("metaLabel")
-        self.eta_label = QLabel("Tempo stimato rimanente: --:--")
-        self.eta_label.setObjectName("metaLabel")
-        self.summary_label = QLabel("Output: --")
-        self.summary_label.setObjectName("metaLabel")
-        self.log_label = QLabel("Dettagli")
-        self.log_label.setObjectName("sectionTitle")
-        self.log_box = QPlainTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setMaximumBlockCount(200)
-        self.log_box.setObjectName("exportLog")
-        self.close_btn = QPushButton("Chiudi")
-        self.close_btn.setObjectName("shellButton")
-        self.close_btn.setProperty("btnRole", "secondary")
-        self.close_btn.setEnabled(False)
-        self.close_btn.clicked.connect(self.accept)
-
-        layout.addWidget(self.title_label)
-        layout.addWidget(self.mode_label)
-        layout.addWidget(self.summary_label)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.elapsed_label)
-        layout.addWidget(self.eta_label)
-        layout.addWidget(self.log_label)
-        layout.addWidget(self.log_box, 1)
-        layout.addWidget(self.close_btn, 0, Qt.AlignmentFlag.AlignRight)
-
-    def set_mode(self, export_kind: str, output_path: str) -> None:
-        if export_kind == "condensato":
-            mode = "Condensato"
-        elif export_kind == "highlights":
-            mode = "Highlights"
-        elif export_kind == "punto":
-            mode = "Punto selezionato"
-        else:
-            mode = export_kind
-        self.mode_label.setText(f"Modalita': {mode}")
-        self.output_path = output_path
-        self.summary_label.setText(f"Output: {output_path}")
-        self.log_box.appendPlainText(f"Avvio export {mode}")
-
-    def set_progress(self, percent: int, elapsed_sec: float, eta_sec: float, status: str) -> None:
-        self._state = "progress"
-        self.close_btn.setEnabled(False)
-        self.progress_bar.setValue(max(0, min(100, percent)))
-        self.status_label.setText(status)
-        self.title_label.setText("Esportazione in corso")
-        self.elapsed_label.setText(f"Tempo trascorso: {format_time(elapsed_sec)}")
-        if eta_sec <= 0.1:
-            self.eta_label.setText("Tempo stimato rimanente: 0:00")
-        else:
-            self.eta_label.setText(f"Tempo stimato rimanente: {format_time(eta_sec)}")
-        if status and status != self._last_status:
-            self._last_status = status
-            self.log_box.appendPlainText(f"[{percent:3d}%] {status}")
-
-    def set_success(self, export_kind: str, output_path: str, chunks: int) -> None:
-        self._state = "success"
-        if export_kind == "condensato":
-            mode = "condensato"
-        elif export_kind == "highlights":
-            mode = "highlights"
-        elif export_kind == "punto":
-            mode = "punto selezionato"
-        else:
-            mode = export_kind
-        self.setWindowTitle("Export completato")
-        self.title_label.setText("Export completato")
-        self.status_label.setText(f"Completato: {chunks} clip ({mode})")
-        self.progress_bar.setValue(100)
-        self.eta_label.setText("Tempo stimato rimanente: 0:00")
-        self.summary_label.setText(f"Output: {output_path}")
-        self.log_box.appendPlainText(f"Export completato: {output_path}")
-        self.close_btn.setEnabled(True)
-
-    def set_error(self, export_kind: str, message: str) -> None:
-        self._state = "error"
-        if export_kind == "condensato":
-            mode = "condensato"
-        elif export_kind == "highlights":
-            mode = "highlights"
-        elif export_kind == "punto":
-            mode = "punto selezionato"
-        else:
-            mode = export_kind
-        self.setWindowTitle("Export fallito")
-        self.title_label.setText("Export fallito")
-        self.status_label.setText(f"Errore durante export {mode}")
-        self.log_box.appendPlainText(message.strip() or "Errore sconosciuto")
-        self.close_btn.setEnabled(True)
-
-    def closeEvent(self, event) -> None:
-        if self._state == "progress":
-            event.ignore()
-            return
-        super().closeEvent(event)
-
-
-class CollapsiblePanel(QWidget):
-    def __init__(self, title: str, expanded: bool = False, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.toggle_btn = QPushButton()
-        self.toggle_btn.setFlat(True)
-        self.toggle_btn.setStyleSheet("text-align: left; font-weight: 700;")
-        self.toggle_btn.clicked.connect(self._toggle)
-        self.content = QWidget()
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        layout.addWidget(self.toggle_btn)
-        layout.addWidget(self.content)
-
-        self.title = title
-        self.expanded = expanded
-        self._refresh()
-
-    def set_content_layout(self, content_layout) -> None:
-        self.content.setLayout(content_layout)
-
-    def _toggle(self) -> None:
-        self.expanded = not self.expanded
-        self._refresh()
-
-    def _refresh(self) -> None:
-        symbol = "▼" if self.expanded else "▶"
-        self.toggle_btn.setText(f"{symbol} {self.title}")
-        self.content.setVisible(self.expanded)
+    def run(self) -> None:
+        result = flags_service.download_flags(self.codes, self.cache_dir)
+        self.finished_with_result.emit(result)
 
 
 class MainWindow(QMainWindow):
@@ -1207,7 +651,7 @@ class MainWindow(QMainWindow):
         self.points: list[PointRecord] = []
         self.selected_point_index: int | None = None
         self.selected_point_id: int | None = None
-        self.capture_state: Literal["IDLE", "RECORDING", "PAUSED_WITHIN_POINT"] = "IDLE"
+        self.capture_state: str = CaptureState.IDLE.value
         self.open_point_id: int | None = None
         self.open_clip_start: float | None = None
         self.open_clip_source_path: str | None = None
@@ -1217,6 +661,7 @@ class MainWindow(QMainWindow):
         self.segments: list[Segment] = []
         self.undo_stack: list[dict] = []
         self.export_worker: ExportWorker | None = None
+        self.flag_download_worker: FlagDownloadWorker | None = None
         self.export_progress_dialog: ExportProgressDialog | None = None
         self.current_export_kind = "condensato"
         self._ephemeral_export_frames: list[str] = []
@@ -1254,7 +699,7 @@ class MainWindow(QMainWindow):
         self.video_container = VideoOverlayContainer(self.video_widget, self.overlay_widget)
 
         self.status_label = QLabel("Nessun video caricato.")
-        self.score_preview_label = QLabel("Preview score: Game 0-0 | Pts 0-0")
+        self.score_preview_label = QLabel("Anteprima punteggio: Game 0-0 | Punti 0-0")
         self.export_length_label = QLabel("Durata export stimata: 0:00")
         self.timeline_slider = QSlider(Qt.Orientation.Horizontal)
         self.timeline_slider.setRange(0, 0)
@@ -1272,7 +717,7 @@ class MainWindow(QMainWindow):
         self.open_project_btn.clicked.connect(self.load_project)
         self.mark_start_btn = QPushButton("Inizio punto")
         self.mark_end_btn = QPushButton("Pausa clip")
-        self.play_pause_btn = QPushButton("Play/Pause")
+        self.play_pause_btn = QPushButton("Riproduci/Pausa")
         self.mark_start_btn.clicked.connect(self.mark_start)
         self.mark_end_btn.clicked.connect(self.mark_end)
         self.play_pause_btn.clicked.connect(self.toggle_play_pause)
@@ -1373,7 +818,7 @@ class MainWindow(QMainWindow):
 
         self.point_a_btn = QPushButton("Punto A")
         self.point_b_btn = QPushButton("Punto B")
-        self.add_last_highlight_btn = QPushButton("Highlight")
+        self.add_last_highlight_btn = QPushButton("Aggiungi agli highlights")
         self.add_last_highlight_btn.setEnabled(False)
         self.add_last_highlight_btn.clicked.connect(self.add_last_point_to_highlights)
         self.reset_score_btn = QPushButton("Reset Score")
@@ -1382,7 +827,7 @@ class MainWindow(QMainWindow):
         self.reset_score_btn.clicked.connect(self.reset_score)
         self.include_overlay = QCheckBox("Includi overlay nell'export")
         self.include_overlay.setChecked(True)
-        self.preview_by_timeline = QCheckBox("Preview scoreboard da timeline")
+        self.preview_by_timeline = QCheckBox("Anteprima punteggio da timeline")
         self.preview_by_timeline.setChecked(True)
         self.preview_by_timeline.stateChanged.connect(self.update_overlay)
 
@@ -1413,10 +858,10 @@ class MainWindow(QMainWindow):
         self.export_btn.clicked.connect(self.export_condensed)
         self.export_highlights_btn = QPushButton("Esporta highlights")
         self.export_highlights_btn.clicked.connect(self.export_highlights)
-        self.export_selected_point_btn = QPushButton("Export punto selezionato")
+        self.export_selected_point_btn = QPushButton("Esporta punto selezionato")
         self.export_selected_point_btn.setEnabled(False)
         self.export_selected_point_btn.clicked.connect(self.export_selected_point)
-        self.preview_overlay_btn = QPushButton("Preview grafica overlay")
+        self.preview_overlay_btn = QPushButton("Anteprima grafica overlay")
         self.preview_overlay_btn.clicked.connect(self.preview_overlay_frame)
         # Keep transport layout stable while labels change (e.g. Pausa/Riprendi, player names).
         self.mark_start_btn.setFixedWidth(130)
@@ -1508,7 +953,7 @@ class MainWindow(QMainWindow):
         transport_row.setContentsMargins(0, 0, 0, 0)
         transport_row.setSpacing(6)
 
-        self.transport_status_chip = QLabel("Idle")
+        self.transport_status_chip = QLabel("Inattivo")
         self.transport_status_chip.setObjectName("statusChip")
 
         playback_group = QWidget()
@@ -1559,7 +1004,7 @@ class MainWindow(QMainWindow):
         source_controls_layout = QVBoxLayout(source_panel)
         source_controls_layout.setContentsMargins(8, 8, 8, 8)
         source_controls_layout.setSpacing(8)
-        source_title = QLabel("Active Source")
+        source_title = QLabel("Sorgente attiva")
         source_title.setObjectName("sectionTitle")
         source_controls_layout.addWidget(source_title)
         source_controls_layout.addWidget(self.active_clip_combo)
@@ -1630,7 +1075,7 @@ class MainWindow(QMainWindow):
         live_layout = QVBoxLayout(live_card)
         live_layout.setContentsMargins(10, 10, 10, 10)
         live_layout.setSpacing(8)
-        live_title = QLabel("Live Score / Inspector")
+        live_title = QLabel("Punteggio live / Ispettore")
         live_title.setObjectName("sectionTitle")
         live_layout.addWidget(live_title)
 
@@ -1667,7 +1112,7 @@ class MainWindow(QMainWindow):
         chips_row.setSpacing(6)
         self.server_status_chip = QLabel("Server: A")
         self.server_status_chip.setObjectName("statusChip")
-        self.point_open_chip = QLabel("Idle")
+        self.point_open_chip = QLabel("Inattivo")
         self.point_open_chip.setObjectName("statusChip")
         chips_row.addWidget(self.server_status_chip)
         chips_row.addWidget(self.point_open_chip)
@@ -1682,7 +1127,7 @@ class MainWindow(QMainWindow):
         players_layout = QVBoxLayout(players_card)
         players_layout.setContentsMargins(10, 10, 10, 10)
         players_layout.setSpacing(8)
-        players_title = QLabel("Players")
+        players_title = QLabel("Giocatori")
         players_title.setObjectName("sectionTitle")
         players_layout.addWidget(players_title)
         players_grid = QGridLayout()
@@ -1712,7 +1157,7 @@ class MainWindow(QMainWindow):
         match_layout = QVBoxLayout(match_card)
         match_layout.setContentsMargins(10, 10, 10, 10)
         match_layout.setSpacing(8)
-        match_title = QLabel("Match Info")
+        match_title = QLabel("Info match")
         match_title.setObjectName("sectionTitle")
         match_layout.addWidget(match_title)
         match_grid = QGridLayout()
@@ -1765,7 +1210,7 @@ class MainWindow(QMainWindow):
         shared_layout = QVBoxLayout(shared_card)
         shared_layout.setContentsMargins(8, 8, 8, 8)
         shared_layout.setSpacing(6)
-        shared_title = QLabel("Shared")
+        shared_title = QLabel("Condiviso")
         shared_title.setObjectName("sectionTitle")
         shared_layout.addWidget(shared_title)
         shared_layout.addWidget(self.use_intro_bg_for_outro)
@@ -1829,7 +1274,7 @@ class MainWindow(QMainWindow):
         export_tab = self.ui_shell.right_export_page.layout()
         export_tab.setSpacing(8)
 
-        export_title = QLabel("Export")
+        export_title = QLabel("Esportazione")
         export_title.setObjectName("sectionTitle")
         export_layout.addWidget(export_title)
         export_layout.addWidget(self.export_include_intro_checkbox)
@@ -1855,10 +1300,10 @@ class MainWindow(QMainWindow):
         self.hotkeys_layout.setContentsMargins(10, 10, 10, 10)
         self.hotkeys_layout.setHorizontalSpacing(10)
         self.hotkeys_layout.setVerticalSpacing(8)
-        self.hotkeys_layout.addWidget(QLabel("Hotkeys configurabili"), 0, 0, 1, 2)
+        self.hotkeys_layout.addWidget(QLabel("Scorciatoie configurabili"), 0, 0, 1, 2)
         self.hotkeys_group_widgets = {}
         for row_idx, (key, title) in enumerate(
-            [("playback", "Playback"), ("marking", "Point Editing"), ("utility", "Utility")],
+            [("playback", "Riproduzione"), ("marking", "Modifica punto"), ("utility", "Utilita'")],
             start=1,
         ):
             card = QFrame()
@@ -1930,11 +1375,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.ui_shell.actions["open_project"])
         file_menu.addAction(self.ui_shell.actions["save_project"])
 
-        edit_menu = menu_bar.addMenu("Edit")
+        edit_menu = menu_bar.addMenu("Modifica")
         edit_menu.addAction(self.ui_shell.actions["undo"])
         edit_menu.addAction(self.ui_shell.actions["clear_focus"])
 
-        view_menu = menu_bar.addMenu("View")
+        view_menu = menu_bar.addMenu("Vista")
         view_menu.addAction(self.ui_shell.actions["toggle_score_preview"])
 
         clip_menu = menu_bar.addMenu("Clip")
@@ -1942,18 +1387,18 @@ class MainWindow(QMainWindow):
         clip_menu.addAction(self.ui_shell.actions["mark_end"])
         clip_menu.addAction(self.ui_shell.actions["highlight"])
 
-        score_menu = menu_bar.addMenu("Score")
+        score_menu = menu_bar.addMenu("Punteggio")
         score_menu.addAction(self.ui_shell.actions["point_a"])
         score_menu.addAction(self.ui_shell.actions["point_b"])
 
-        export_menu = menu_bar.addMenu("Export")
+        export_menu = menu_bar.addMenu("Esportazione")
         export_menu.addAction(self.ui_shell.actions["export"])
         export_menu.addAction(self.ui_shell.actions["export_highlights"])
 
-        help_menu = menu_bar.addMenu("Help")
+        help_menu = menu_bar.addMenu("Aiuto")
         help_menu.addAction(self.ui_shell.actions["about"])
 
-    def _show_themed_question(self, title: str, text: str, yes_label: str = "Yes", no_label: str = "No") -> bool:
+    def _show_themed_question(self, title: str, text: str, yes_label: str = "Si'", no_label: str = "No") -> bool:
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
         dialog.setModal(True)
@@ -2092,7 +1537,7 @@ class MainWindow(QMainWindow):
             shortcut.activated.connect(lambda cb=callback: self._run_shortcut_action(cb))
             self.shortcuts[key] = shortcut
         if hasattr(self, "ui_shell"):
-            self.ui_shell.hotkeys_state_label.setText("Hotkeys: active")
+            self.ui_shell.hotkeys_state_label.setText("Scorciatoie: attive")
 
     def _run_shortcut_action(self, callback) -> None:
         focus = self.focusWidget()
@@ -2108,20 +1553,20 @@ class MainWindow(QMainWindow):
                 self.server_status_chip.setText(f"Server: {self.current_server}")
         self._sync_legacy_pending_fields()
         if hasattr(self, "point_open_chip"):
-            if self.capture_state != "IDLE" and self.pending_point_start is not None:
+            if not self._is_capture_state(CaptureState.IDLE) and self.pending_point_start is not None:
                 self.point_open_chip.setText(f"PUNTO APERTO {format_time(self.pending_point_start)}")
                 self.point_open_chip.setProperty("chipState", "active")
             else:
-                self.point_open_chip.setText("Idle")
+                self.point_open_chip.setText("Inattivo")
                 self.point_open_chip.setProperty("chipState", "idle")
             self.point_open_chip.style().unpolish(self.point_open_chip)
             self.point_open_chip.style().polish(self.point_open_chip)
         if hasattr(self, "transport_status_chip"):
-            if self.capture_state != "IDLE" and self.pending_point_start is not None:
+            if not self._is_capture_state(CaptureState.IDLE) and self.pending_point_start is not None:
                 self.transport_status_chip.setText(f"REC {format_time(self.pending_point_start)}")
                 self.transport_status_chip.setProperty("chipState", "active")
             else:
-                self.transport_status_chip.setText("Ready")
+                self.transport_status_chip.setText("Pronto")
                 self.transport_status_chip.setProperty("chipState", "idle")
             self.transport_status_chip.style().unpolish(self.transport_status_chip)
             self.transport_status_chip.style().polish(self.transport_status_chip)
@@ -2135,11 +1580,11 @@ class MainWindow(QMainWindow):
             self.empty_state_load_btn.setEnabled(True)
         if hasattr(self, "source_empty_label"):
             if len(self.input_paths) == 0:
-                self.source_empty_label.setText("No source loaded")
+                self.source_empty_label.setText("Nessuna sorgente caricata")
                 self.source_empty_label.setVisible(True)
             else:
                 active_name = os.path.basename(self.input_path) if self.input_path else os.path.basename(self.input_paths[0])
-                self.source_empty_label.setText(f"Active: {active_name}")
+                self.source_empty_label.setText(f"Attiva: {active_name}")
                 self.source_empty_label.setVisible(True)
         if hasattr(self, "segments_empty_label"):
             self.segments_empty_label.setVisible(len(self.segments) == 0)
@@ -2152,6 +1597,17 @@ class MainWindow(QMainWindow):
 
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
+
+    def _capture_state_name(self) -> str:
+        return normalize_capture_state(self.capture_state).value
+
+    def _set_capture_state(self, state: CaptureState | str) -> None:
+        self.capture_state = normalize_capture_state(state).value
+
+    def _is_capture_state(self, *states: CaptureState | str) -> bool:
+        current = self._capture_state_name()
+        normalized = [normalize_capture_state(state).value for state in states]
+        return current in normalized
 
     def points_text(self, points: int) -> str:
         if points <= 3:
@@ -2278,18 +1734,81 @@ class MainWindow(QMainWindow):
         return OverlayState(**asdict(state))
 
     def _get_open_point_index(self) -> int | None:
-        if self.open_point_id is None:
-            return None
-        for idx, point in enumerate(self.points):
-            if point.id == self.open_point_id:
-                return idx
-        return None
+        return point_workflow.get_open_point_index(self.points, self.open_point_id)
 
     def _has_finalized_points(self) -> bool:
         return any(point.winner in ("A", "B") for point in self.points)
 
     def _ordered_points(self) -> list[PointRecord]:
-        return sorted(self.points, key=lambda point: point.id)
+        return point_workflow.ordered_points(self.points)
+
+    def _workflow_snapshot(self) -> point_workflow.WorkflowState:
+        return point_workflow.WorkflowState(
+            points=self.points,
+            selected_point_id=self.selected_point_id,
+            capture_state=self._capture_state_name(),
+            open_point_id=self.open_point_id,
+            open_clip_start=self.open_clip_start,
+            open_clip_source_path=self.open_clip_source_path,
+            next_point_id=self.next_point_id,
+        )
+
+    def _apply_workflow_state(self, wf_state: point_workflow.WorkflowState) -> None:
+        self.points = wf_state.points
+        self.selected_point_id = wf_state.selected_point_id
+        self.open_point_id = wf_state.open_point_id
+        self.open_clip_start = wf_state.open_clip_start
+        self.open_clip_source_path = wf_state.open_clip_source_path
+        self.next_point_id = wf_state.next_point_id
+        self._set_capture_state(wf_state.capture_state)
+        self._sync_selected_point_index_from_id()
+
+    def _build_source_order_and_durations(self, *, start_source: str, end_source: str) -> tuple[list[str], dict[str, float], str | None]:
+        source_order = list(self.input_paths) if self.input_paths else []
+        if not source_order:
+            source_order = [start_source]
+        elif start_source not in source_order:
+            source_order = source_order + [start_source]
+        if end_source not in source_order:
+            source_order = source_order + [end_source]
+
+        durations: dict[str, float] = {}
+        try:
+            start_idx = source_order.index(start_source)
+            end_idx = source_order.index(end_source)
+        except ValueError:
+            if start_source != end_source:
+                return source_order, durations, "Intervallo clip non valido: sorgente iniziale/finale non trovata."
+            return source_order, durations, None
+        if end_idx < start_idx:
+            return source_order, durations, "Intervallo clip non valido: la sorgente finale precede quella iniziale."
+
+        for idx in range(start_idx, end_idx):
+            src = source_order[idx]
+            duration = self._probe_clip_duration(src)
+            if duration is None:
+                return source_order, durations, f"Impossibile leggere la durata clip: {os.path.basename(src)}"
+            durations[src] = duration
+        return source_order, durations, None
+
+    def _build_match_settings_snapshot(self) -> MatchSettingsSnapshot:
+        return MatchSettingsSnapshot(
+            player_a=self.player_a_input.text().strip() or "Giocatore A",
+            player_b=self.player_b_input.text().strip() or "Giocatore B",
+            rank_a=self.rank_a_input.text().strip(),
+            rank_b=self.rank_b_input.text().strip(),
+            tournament=self.tournament_input.text().strip() or "Amateur Tennis Tour",
+            round_name=self.round_input.text().strip() or "Round of 32",
+            best_of_index=self.best_of.currentIndex(),
+            deciding_set_mode_index=self.deciding_set_mode.currentIndex(),
+            initial_server=self._runtime_initial_server(),
+            overlay_corner=self.overlay_corner_combo.currentText(),
+            overlay_scale=self.overlay_widget.scale_factor,
+            flag_a_code=normalize_flag_code(self.flag_a_code_input.text()),
+            flag_b_code=normalize_flag_code(self.flag_b_code_input.text()),
+            flag_a_path=self.flag_a_path,
+            flag_b_path=self.flag_b_path,
+        )
 
     def _resolve_point_ref(self, point_ref: int | PointRecord) -> PointRecord | None:
         if isinstance(point_ref, PointRecord):
@@ -2301,9 +1820,6 @@ class MainWindow(QMainWindow):
             return self.points[point_ref]
         return None
 
-    def _runtime_opponent(self, side: str) -> str:
-        return "B" if side == "A" else "A"
-
     def _runtime_initial_server(self) -> str:
         if self.starting_server in ("A", "B"):
             return self.starting_server
@@ -2312,309 +1828,70 @@ class MainWindow(QMainWindow):
             return selected
         return "A"
 
-    def _runtime_initial_state(self) -> MatchRuntimeState:
-        initial_server = self._runtime_initial_server()
-        return MatchRuntimeState(
-            starting_server=initial_server,
-            current_server=initial_server,
-            tiebreak_first_server=None,
-            points_a=0,
-            points_b=0,
-            tb_points_a=0,
-            tb_points_b=0,
-            games_a=0,
-            games_b=0,
-            sets_a=0,
-            sets_b=0,
-            completed_sets=[],
-            completed_set_tb_loser_points=[],
-            in_tiebreak=False,
-            tiebreak_target=7,
-            tiebreak_super=False,
-        )
-
-    def _runtime_start_tiebreak(self, state: MatchRuntimeState, target: int, super_mode: bool) -> None:
-        state.in_tiebreak = True
-        state.tiebreak_target = target
-        state.tiebreak_super = super_mode
-        state.tiebreak_first_server = state.current_server
-        state.points_a = 0
-        state.points_b = 0
-        state.tb_points_a = 0
-        state.tb_points_b = 0
-
-    def _runtime_award_set_from_tiebreak(self, state: MatchRuntimeState, side: str) -> None:
-        if state.tiebreak_super:
-            final_games = (state.tb_points_a, state.tb_points_b)
-            state.completed_set_tb_loser_points.append(None)
-        else:
-            final_games = (7, 6) if side == "A" else (6, 7)
-            loser_tb = state.tb_points_b if side == "A" else state.tb_points_a
-            state.completed_set_tb_loser_points.append(loser_tb)
-        state.completed_sets.append(final_games)
-        if side == "A":
-            state.sets_a += 1
-        else:
-            state.sets_b += 1
-        state.games_a = 0
-        state.games_b = 0
-        state.points_a = 0
-        state.points_b = 0
-        state.tb_points_a = 0
-        state.tb_points_b = 0
-        state.in_tiebreak = False
-        state.tiebreak_super = False
-        state.tiebreak_target = 7
-        if state.tiebreak_first_server in ("A", "B"):
-            state.current_server = self._runtime_opponent(state.tiebreak_first_server)
-        state.tiebreak_first_server = None
-
-    def _runtime_award_game(self, state: MatchRuntimeState, side: str) -> None:
-        if side == "A":
-            state.games_a += 1
-        else:
-            state.games_b += 1
-        state.points_a = 0
-        state.points_b = 0
-        state.current_server = self._runtime_opponent(state.current_server)
-        if state.games_a == 6 and state.games_b == 6:
-            self._runtime_start_tiebreak(state, 7, False)
-            return
-        set_ended = False
-        if state.games_a >= 6 and state.games_a - state.games_b >= 2:
-            state.completed_sets.append((state.games_a, state.games_b))
-            state.completed_set_tb_loser_points.append(None)
-            state.sets_a += 1
-            state.games_a = 0
-            state.games_b = 0
-            set_ended = True
-        elif state.games_b >= 6 and state.games_b - state.games_a >= 2:
-            state.completed_sets.append((state.games_a, state.games_b))
-            state.completed_set_tb_loser_points.append(None)
-            state.sets_b += 1
-            state.games_a = 0
-            state.games_b = 0
-            set_ended = True
-        if (
-            set_ended
-            and self.best_of.currentIndex() == 0
-            and self.deciding_set_mode.currentIndex() == 1
-            and state.sets_a == 1
-            and state.sets_b == 1
-        ):
-            self._runtime_start_tiebreak(state, 10, True)
-
-    def _runtime_apply_point_winner(self, state: MatchRuntimeState, side: str) -> None:
-        if state.in_tiebreak:
-            if side == "A":
-                state.tb_points_a += 1
-            else:
-                state.tb_points_b += 1
-            a_tb, b_tb = state.tb_points_a, state.tb_points_b
-            total_tb_points = a_tb + b_tb
-            if a_tb >= state.tiebreak_target and a_tb - b_tb >= 2:
-                self._runtime_award_set_from_tiebreak(state, "A")
-            elif b_tb >= state.tiebreak_target and b_tb - a_tb >= 2:
-                self._runtime_award_set_from_tiebreak(state, "B")
-            elif total_tb_points % 2 == 1:
-                state.current_server = self._runtime_opponent(state.current_server)
-            return
-        if side == "A":
-            a, b = state.points_a, state.points_b
-            if a <= 2:
-                state.points_a += 1
-            elif a == 3 and b <= 2:
-                self._runtime_award_game(state, "A")
-            elif a == 3 and b == 3:
-                state.points_a = 4
-            elif a == 4:
-                self._runtime_award_game(state, "A")
-            elif b == 4:
-                state.points_b = 3
-            return
-        a, b = state.points_a, state.points_b
-        if b <= 2:
-            state.points_b += 1
-        elif b == 3 and a <= 2:
-            self._runtime_award_game(state, "B")
-        elif b == 3 and a == 3:
-            state.points_b = 4
-        elif b == 4:
-            self._runtime_award_game(state, "B")
-        elif a == 4:
-            state.points_a = 3
-
     def _replay_runtime_state(self, stop_before_point_id: int | None = None, stop_after_point_id: int | None = None) -> MatchRuntimeState:
-        state = self._runtime_initial_state()
-        for point in self._ordered_points():
-            if point.winner not in ("A", "B"):
-                continue
-            if stop_before_point_id is not None and point.id >= stop_before_point_id:
-                break
-            self._runtime_apply_point_winner(state, point.winner)
-            if stop_after_point_id is not None and point.id == stop_after_point_id:
-                break
-        return state
+        return scoring_engine.replay_runtime_state(
+            self.points,
+            self._build_match_settings_snapshot(),
+            stop_before_point_id=stop_before_point_id,
+            stop_after_point_id=stop_after_point_id,
+        )
 
     def derive_match_state_before_point(self, point_ref: int | PointRecord) -> MatchRuntimeState | None:
         point = self._resolve_point_ref(point_ref)
         if point is None:
             return None
-        return self._replay_runtime_state(stop_before_point_id=point.id)
+        return scoring_engine.derive_match_state_before_point(
+            self.points, self._build_match_settings_snapshot(), point.id
+        )
 
     def derive_match_state_after_point(self, point_ref: int | PointRecord) -> MatchRuntimeState | None:
         point = self._resolve_point_ref(point_ref)
         if point is None:
             return None
-        return self._replay_runtime_state(stop_after_point_id=point.id)
-
-    def get_server_for_point(self, point_ref: int | PointRecord) -> str | None:
-        state = self.derive_match_state_before_point(point_ref)
-        return state.current_server if state is not None else None
-
-    def _runtime_active_points_text(self, state: MatchRuntimeState) -> tuple[str, str]:
-        if state.in_tiebreak:
-            return str(state.tb_points_a), str(state.tb_points_b)
-        return self.points_text(state.points_a), self.points_text(state.points_b)
-
-    def _overlay_set_columns_from_runtime(self, state: MatchRuntimeState) -> tuple[str, str, str, str]:
-        set1_a = ""
-        set1_b = ""
-        set2_a = ""
-        set2_b = ""
-        if len(state.completed_sets) >= 1:
-            set1_a = str(state.completed_sets[0][0])
-            set1_b = str(state.completed_sets[0][1])
-        else:
-            set1_a = str(state.games_a)
-            set1_b = str(state.games_b)
-        if len(state.completed_sets) >= 2:
-            set2_a = str(state.completed_sets[1][0])
-            set2_b = str(state.completed_sets[1][1])
-        elif len(state.completed_sets) == 1:
-            set2_a = str(state.games_a)
-            set2_b = str(state.games_b)
-        return set1_a, set1_b, set2_a, set2_b
-
-    def _wins_game_on_point_runtime(self, side: str, state: MatchRuntimeState) -> bool:
-        if state.in_tiebreak:
-            return False
-        if side == "A":
-            if state.points_a <= 2:
-                return False
-            if state.points_a == 3 and state.points_b <= 2:
-                return True
-            return state.points_a == 4
-        if state.points_b <= 2:
-            return False
-        if state.points_b == 3 and state.points_a <= 2:
-            return True
-        return state.points_b == 4
-
-    def _set_winner_if_point_won_runtime(self, side: str, state: MatchRuntimeState) -> str | None:
-        if state.in_tiebreak:
-            a_tb = state.tb_points_a + (1 if side == "A" else 0)
-            b_tb = state.tb_points_b + (1 if side == "B" else 0)
-            if a_tb >= state.tiebreak_target and a_tb - b_tb >= 2:
-                return "A"
-            if b_tb >= state.tiebreak_target and b_tb - a_tb >= 2:
-                return "B"
-            return None
-        if not self._wins_game_on_point_runtime(side, state):
-            return None
-        new_games_a = state.games_a + (1 if side == "A" else 0)
-        new_games_b = state.games_b + (1 if side == "B" else 0)
-        if new_games_a >= 6 and new_games_a - new_games_b >= 2:
-            return "A"
-        if new_games_b >= 6 and new_games_b - new_games_a >= 2:
-            return "B"
-        return None
-
-    def _match_winner_if_point_won_runtime(self, side: str, state: MatchRuntimeState) -> str | None:
-        set_winner = self._set_winner_if_point_won_runtime(side, state)
-        if not set_winner:
-            return None
-        needed_sets = 2 if self.best_of.currentIndex() == 0 else 3
-        new_sets_a = state.sets_a + (1 if set_winner == "A" else 0)
-        new_sets_b = state.sets_b + (1 if set_winner == "B" else 0)
-        if new_sets_a >= needed_sets:
-            return "A"
-        if new_sets_b >= needed_sets:
-            return "B"
-        return None
-
-    def _alert_banner_from_runtime(self, state: MatchRuntimeState) -> str:
-        if self._match_winner_if_point_won_runtime("A", state) or self._match_winner_if_point_won_runtime("B", state):
-            return "MATCH POINT"
-        if self._set_winner_if_point_won_runtime("A", state) or self._set_winner_if_point_won_runtime("B", state):
-            return "SET POINT"
-        receiver = self._runtime_opponent(state.current_server)
-        if self._wins_game_on_point_runtime(receiver, state):
-            return "BREAK POINT"
-        return ""
-
-    def _overlay_state_from_runtime(self, state: MatchRuntimeState) -> OverlayState:
-        points_a_text, points_b_text = self._runtime_active_points_text(state)
-        set1_a, set1_b, set2_a, set2_b = self._overlay_set_columns_from_runtime(state)
-        return OverlayState(
-            player_a=self.player_a_input.text().strip() or "Giocatore A",
-            player_b=self.player_b_input.text().strip() or "Giocatore B",
-            sets_a=state.sets_a,
-            sets_b=state.sets_b,
-            games_a=state.games_a,
-            games_b=state.games_b,
-            points_a=points_a_text,
-            points_b=points_b_text,
-            server=state.current_server,
-            tournament=self.tournament_input.text().strip() or "Amateur Tennis Tour",
-            overlay_corner=self.overlay_corner_combo.currentText(),
-            overlay_scale=self.overlay_widget.scale_factor,
-            set_col1_a=set1_a,
-            set_col1_b=set1_b,
-            set_col2_a=set2_a,
-            set_col2_b=set2_b,
-            alert_banner=self._alert_banner_from_runtime(state),
-            flag_a_code=normalize_flag_code(self.flag_a_code_input.text()),
-            flag_b_code=normalize_flag_code(self.flag_b_code_input.text()),
-            flag_a_path=self.flag_a_path,
-            flag_b_path=self.flag_b_path,
+        return scoring_engine.derive_match_state_after_point(
+            self.points, self._build_match_settings_snapshot(), point.id
         )
 
-    def derive_overlay_state_before_point(self, point_ref: int | PointRecord) -> OverlayState | None:
-        state = self.derive_match_state_before_point(point_ref)
-        if state is None:
+    def get_server_for_point(self, point_ref: int | PointRecord) -> str | None:
+        point = self._resolve_point_ref(point_ref)
+        if point is None:
             return None
-        return self._overlay_state_from_runtime(state)
+        return scoring_engine.get_server_for_point(
+            self.points, self._build_match_settings_snapshot(), point.id
+        )
+
+    def _overlay_state_from_runtime(self, state: MatchRuntimeState) -> OverlayState:
+        return runtime_overlay.overlay_state_from_runtime(state, self._build_match_settings_snapshot())
+
+    def derive_overlay_state_before_point(self, point_ref: int | PointRecord) -> OverlayState | None:
+        point = self._resolve_point_ref(point_ref)
+        if point is None:
+            return None
+        return runtime_overlay.derive_overlay_state_before_point(
+            self.points, self._build_match_settings_snapshot(), point.id
+        )
 
     def derive_overlay_state_after_point(self, point_ref: int | PointRecord) -> OverlayState | None:
-        state = self.derive_match_state_after_point(point_ref)
-        if state is None:
+        point = self._resolve_point_ref(point_ref)
+        if point is None:
             return None
-        return self._overlay_state_from_runtime(state)
+        return runtime_overlay.derive_overlay_state_after_point(
+            self.points, self._build_match_settings_snapshot(), point.id
+        )
 
     def derive_overlay_state_for_position(self, source_path: str, local_time: float) -> OverlayState | None:
-        point_idx = self._resolve_point_selection_for_position(source_path, local_time)
-        if point_idx is None or point_idx < 0 or point_idx >= len(self.points):
-            return None
-        point = self.points[point_idx]
-        if point.winner in ("A", "B"):
-            bounds = self._point_source_bounds(point, source_path)
-            if bounds is None:
-                return self.derive_overlay_state_before_point(point)
-            point_start, point_end = bounds
-            # Finalized points use PRE-point state while cursor is inside the point range,
-            # and POST-point state in the dead zone after the point.
-            if point_start <= local_time <= point_end:
-                return self.derive_overlay_state_before_point(point)
-            if local_time > point_end:
-                return self.derive_overlay_state_after_point(point)
-            return self.derive_overlay_state_before_point(point)
-        if self.capture_state in ("RECORDING", "PAUSED_WITHIN_POINT") and self.open_point_id == point.id:
-            return self.current_overlay_state()
-        return self.derive_overlay_state_before_point(point)
+        return runtime_overlay.derive_overlay_state_for_position(
+            self.points,
+            source_path,
+            local_time,
+            self._build_match_settings_snapshot(),
+            self._capture_state_name(),
+            self.open_point_id,
+            self.current_overlay_state(),
+        )
 
     def _sync_legacy_pending_fields(self) -> None:
-        if self.capture_state == "IDLE":
+        if self._is_capture_state(CaptureState.IDLE):
             self.pending_point_start = None
             self.pending_point_source_path = None
             return
@@ -2627,44 +1904,20 @@ class MainWindow(QMainWindow):
         first_clip = point.clips[0] if point.clips else None
         self.pending_point_start = (
             self.open_clip_start
-            if self.capture_state == "RECORDING" and self.open_clip_start is not None
+            if self._is_capture_state(CaptureState.RECORDING) and self.open_clip_start is not None
             else (first_clip.start if first_clip else self.current_time_sec())
         )
         self.pending_point_source_path = (
             self.open_clip_source_path
-            if self.capture_state == "RECORDING" and self.open_clip_source_path
+            if self._is_capture_state(CaptureState.RECORDING) and self.open_clip_source_path
             else (first_clip.source_path if first_clip else self.input_path)
         )
 
     def _point_source_bounds(self, point: PointRecord, source_path: str) -> tuple[float, float] | None:
-        source_clips = [clip for clip in point.clips if clip.source_path == source_path]
-        if not source_clips:
-            return None
-        start = min(clip.start for clip in source_clips)
-        end = max(clip.end for clip in source_clips)
-        return (start, end)
+        return runtime_overlay.point_source_bounds(point, source_path)
 
     def _resolve_point_selection_for_position(self, source_path: str, local_t: float) -> int | None:
-        source_entries: list[tuple[int, float, float]] = []
-        for idx, point in enumerate(self.points):
-            bounds = self._point_source_bounds(point, source_path)
-            if bounds is None:
-                continue
-            source_entries.append((idx, bounds[0], bounds[1]))
-        if not source_entries:
-            return None
-        source_entries.sort(key=lambda item: (item[1], self.points[item[0]].id))
-        first_idx, first_start, _ = source_entries[0]
-        if local_t < first_start:
-            return None
-        prev_idx = first_idx
-        for idx, start, end in source_entries:
-            if start <= local_t <= end:
-                return idx
-            if local_t < start:
-                return prev_idx
-            prev_idx = idx
-        return prev_idx
+        return runtime_overlay.resolve_point_selection_for_position(self.points, source_path, local_t)
 
     def _sync_selected_point_from_timeline(self) -> None:
         if not self.input_path:
@@ -2716,29 +1969,18 @@ class MainWindow(QMainWindow):
         self.points_list.blockSignals(False)
 
     def _flatten_points_to_segments(self) -> list[Segment]:
-        flat: list[Segment] = []
-        for point in self._ordered_points():
-            overlay_ref = self.derive_overlay_state_before_point(point)
-            if overlay_ref is None:
-                overlay_ref = self.current_overlay_state()
-            for clip in point.clips:
-                if clip.end - clip.start <= 0:
-                    continue
-                flat.append(
-                    Segment(
-                        start=clip.start,
-                        end=clip.end,
-                        source_path=clip.source_path,
-                        overlay=self._clone_overlay_state(overlay_ref),
-                        is_highlight=point.is_highlight,
-                    )
-                )
-        return flat
+        return segment_projection.flatten_points_to_segments(
+            points=self.points,
+            settings=self._build_match_settings_snapshot(),
+            source_order=list(self.input_paths),
+            durations=None,
+            default_overlay=self.current_overlay_state(),
+        )
 
     def _overlay_for_point_preview(self, point: PointRecord) -> OverlayState | None:
         if point.winner in ("A", "B"):
             return self.derive_overlay_state_before_point(point)
-        if self.capture_state in ("RECORDING", "PAUSED_WITHIN_POINT") and self.open_point_id == point.id:
+        if self._is_capture_state(CaptureState.RECORDING, CaptureState.PAUSED_WITHIN_POINT) and self.open_point_id == point.id:
             return self.current_overlay_state()
         return self.derive_overlay_state_before_point(point)
 
@@ -2866,24 +2108,24 @@ class MainWindow(QMainWindow):
         name_b = self._short_player_name(self.player_b_input.text(), "B")
         self.point_a_btn.setText(f"Punto {name_a}")
         self.point_b_btn.setText(f"Punto {name_b}")
-        is_idle = self.capture_state == "IDLE"
+        is_idle = self._is_capture_state(CaptureState.IDLE)
         requires_server_init = not self._has_finalized_points() and not self.initial_server_explicitly_set
         self.mark_start_btn.setEnabled(bool(self.input_path) and is_idle and not requires_server_init)
         if requires_server_init:
             self.mark_start_btn.setToolTip("Seleziona il servitore iniziale per iniziare il match.")
         else:
             self.mark_start_btn.setToolTip("")
-        if self.capture_state == "RECORDING":
+        if self._is_capture_state(CaptureState.RECORDING):
             self.mark_end_btn.setText("Pausa clip")
             self.mark_end_btn.setEnabled(True)
-        elif self.capture_state == "PAUSED_WITHIN_POINT":
+        elif self._is_capture_state(CaptureState.PAUSED_WITHIN_POINT):
             self.mark_end_btn.setText("Riprendi clip")
             self.mark_end_btn.setEnabled(True)
         else:
             self.mark_end_btn.setText("Pausa clip")
             self.mark_end_btn.setEnabled(False)
-        can_award = self.capture_state in ("RECORDING", "PAUSED_WITHIN_POINT")
-        if self.capture_state == "PAUSED_WITHIN_POINT":
+        can_award = self._is_capture_state(CaptureState.RECORDING, CaptureState.PAUSED_WITHIN_POINT)
+        if self._is_capture_state(CaptureState.PAUSED_WITHIN_POINT):
             idx = self._get_open_point_index()
             can_award = idx is not None and len(self.points[idx].clips) > 0
         self.point_a_btn.setEnabled(can_award)
@@ -2892,7 +2134,7 @@ class MainWindow(QMainWindow):
     def update_score_preview_label(self) -> None:
         state = self.current_overlay_state()
         prefix = "Live"
-        if self.capture_state in ("RECORDING", "PAUSED_WITHIN_POINT"):
+        if self._is_capture_state(CaptureState.RECORDING, CaptureState.PAUSED_WITHIN_POINT):
             state = self.current_overlay_state()
             prefix = "Live"
         else:
@@ -2906,7 +2148,7 @@ class MainWindow(QMainWindow):
                     state = last_state
                     prefix = "Ultimo punto"
         self.score_preview_label.setText(
-            f"Preview {prefix}: Game {state.games_a}-{state.games_b} | Pts {state.points_a}-{state.points_b}"
+            f"Anteprima {prefix}: Game {state.games_a}-{state.games_b} | Punti {state.points_a}-{state.points_b}"
         )
         if hasattr(self, "score_row_a_name"):
             live_name_a = self.player_a_input.text().strip() or state.player_a
@@ -2950,7 +2192,7 @@ class MainWindow(QMainWindow):
         ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
         t = max(0.0, self.current_time_sec())
         overlay_state = self.current_overlay_state()
-        if self.capture_state not in ("RECORDING", "PAUSED_WITHIN_POINT"):
+        if not self._is_capture_state(CaptureState.RECORDING, CaptureState.PAUSED_WITHIN_POINT):
             derived = self.derive_overlay_state_for_position(self.input_path, t)
             if derived is not None:
                 overlay_state = derived
@@ -2973,17 +2215,17 @@ class MainWindow(QMainWindow):
             ]
             res = subprocess.run(cmd, capture_output=True, text=True)
             if res.returncode != 0 or not os.path.exists(out_png):
-                QMessageBox.critical(self, "Errore preview", res.stderr.strip() or "Preview fallita.")
+                QMessageBox.critical(self, "Errore anteprima", res.stderr.strip() or "Anteprima fallita.")
                 return
 
             dialog = QDialog(self)
             dialog.setObjectName("overlayPreviewDialog")
-            dialog.setWindowTitle("Preview grafica overlay")
+            dialog.setWindowTitle("Anteprima grafica overlay")
             dialog.setMinimumSize(900, 560)
             layout = QVBoxLayout(dialog)
             layout.setContentsMargins(14, 14, 14, 14)
             layout.setSpacing(10)
-            title = QLabel("Preview grafica overlay")
+            title = QLabel("Anteprima grafica overlay")
             title.setObjectName("dialogTitle")
             scale_label = self.overlay_scale_combo.currentText().strip() or f"{int(overlay_state.overlay_scale * 100)}%"
             info = QLabel(
@@ -3066,56 +2308,34 @@ class MainWindow(QMainWindow):
         if not code_a and not code_b:
             QMessageBox.warning(self, "Bandiere", "Inserisci almeno un codice paese ISO2 (es. IT, ES).")
             return
+        if self.flag_download_worker is not None and self.flag_download_worker.isRunning():
+            self.flags_status_label.setText("Download bandiere gia' in corso...")
+            return
         cache_dir = self._flags_cache_dir()
-        downloaded: list[str] = []
-        failed: list[str] = []
-        failures_detail: dict[str, str] = {}
-        ssl_ctx = ssl.create_default_context()
-        for code in [code_a, code_b]:
-            if not code:
-                continue
-            target = os.path.join(cache_dir, f"{code.lower()}.png")
-            candidates = [
-                f"https://raw.githubusercontent.com/ashleedawg/flags/master/{code}.png",
-                f"https://raw.githubusercontent.com/ashleedawg/flags/master/{code.lower()}.png",
-                f"https://raw.githubusercontent.com/ashleedawg/flags/main/{code}.png",
-                f"https://raw.githubusercontent.com/ashleedawg/flags/main/{code.lower()}.png",
-            ]
-            last_error = "not found"
-            ok = False
-            for url in candidates:
-                try:
-                    req = urllib.request.Request(url, headers={"User-Agent": "tennis-match-condenser/1.5"})
-                    with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as response:
-                        payload = response.read()
-                    if not payload:
-                        raise RuntimeError("empty file")
-                    with open(target, "wb") as out:
-                        out.write(payload)
-                    downloaded.append(code)
-                    ok = True
-                    break
-                except urllib.error.HTTPError as exc:
-                    last_error = f"HTTP {exc.code}"
-                except urllib.error.URLError as exc:
-                    last_error = f"network {exc.reason}"
-                except ssl.SSLError as exc:
-                    last_error = f"ssl {exc}"
-                except (TimeoutError, OSError, RuntimeError) as exc:
-                    last_error = str(exc)
-            if not ok:
-                failed.append(code)
-                failures_detail[code] = last_error
+        self.flags_download_btn.setEnabled(False)
+        self.flags_status_label.setText("Download bandiere in corso...")
+        self.flag_download_worker = FlagDownloadWorker([code_a, code_b], cache_dir)
+        self.flag_download_worker.finished_with_result.connect(self._on_flags_download_finished)
+        self.flag_download_worker.finished.connect(self._on_flags_download_worker_done)
+        self.flag_download_worker.start()
+
+    def _on_flags_download_finished(self, result: object) -> None:
+        if not isinstance(result, flags_service.FlagDownloadResult):
+            self.flags_status_label.setText("Errore interno download bandiere.")
+            self.update_overlay()
+            return
+        code_a = normalize_flag_code(self.flag_a_code_input.text())
+        code_b = normalize_flag_code(self.flag_b_code_input.text())
         self.flag_a_path = self._resolve_local_flag_path(code_a)
         self.flag_b_path = self._resolve_local_flag_path(code_b)
-        if downloaded and not failed:
-            self.flags_status_label.setText(f"Bandiere scaricate: {', '.join(downloaded)}")
-        elif downloaded and failed:
+        if result.downloaded and not result.failed:
+            self.flags_status_label.setText(f"Bandiere scaricate: {', '.join(result.downloaded)}")
+        elif result.downloaded and result.failed:
             self.flags_status_label.setText(
-                f"Scaricate: {', '.join(downloaded)} | Fallite: {', '.join(failed)}"
+                f"Scaricate: {', '.join(result.downloaded)} | Fallite: {', '.join(result.failed)}"
             )
         else:
-            detail_txt = "; ".join(f"{k} ({v})" for k, v in failures_detail.items()) or ", ".join(failed)
+            detail_txt = "; ".join(f"{k} ({v})" for k, v in result.failures_detail.items()) or ", ".join(result.failed)
             self.flags_status_label.setText(f"Download fallito per: {detail_txt}")
             QMessageBox.warning(
                 self,
@@ -3123,6 +2343,10 @@ class MainWindow(QMainWindow):
                 f"Download non riuscito.\nDettaglio: {detail_txt}\nVerifica connessione o codici ISO2.",
             )
         self.update_overlay()
+
+    def _on_flags_download_worker_done(self) -> None:
+        self.flags_download_btn.setEnabled(True)
+        self.flag_download_worker = None
 
     def on_overlay_corner_changed(self, corner: str) -> None:
         self.video_container.set_overlay_corner(corner)
@@ -3198,7 +2422,7 @@ class MainWindow(QMainWindow):
         eta_txt = format_time(self.estimated_export_duration())
         self.export_length_label.setText(f"Durata export stimata: {eta_txt}")
         if hasattr(self, "ui_shell"):
-            self.ui_shell.export_estimate_label.setText(f"Export: {eta_txt}")
+            self.ui_shell.export_estimate_label.setText(f"Esportazione: {eta_txt}")
         if hasattr(self, "export_summary_label"):
             hl_count = sum(1 for point in self.points if point.is_highlight)
             intro_txt = "si" if self.enable_intro_checkbox.isChecked() else "no"
@@ -3237,7 +2461,7 @@ class MainWindow(QMainWindow):
         self.player.setSource(QUrl.fromLocalFile(self.input_path))
         self.pending_point_start = None
         self.pending_point_source_path = None
-        self.capture_state = "IDLE"
+        self._set_capture_state(CaptureState.IDLE)
         self.open_point_id = None
         self.open_clip_start = None
         self.open_clip_source_path = None
@@ -3280,7 +2504,7 @@ class MainWindow(QMainWindow):
         self._update_source_fps_status(self.input_path)
         self._sync_selected_point_from_timeline()
         self._refresh_shell_empty_states()
-        if self.capture_state != "IDLE":
+        if not self._is_capture_state(CaptureState.IDLE):
             self.set_status(
                 f"Clip attiva: {os.path.basename(self.input_path)} (punto in corso, chiudilo con Pausa clip o Punto A/B)."
             )
@@ -3565,29 +2789,17 @@ class MainWindow(QMainWindow):
     def _project_payload(self) -> dict:
         self._sync_legacy_pending_fields()
         self._rebuild_segments_from_points()
-        current_clip_index = self.active_clip_combo.currentIndex()
-        return {
-            "version": 4,
-            "input_paths": self.input_paths,
-            "current_clip_index": current_clip_index,
-            "pending_point_start": self.pending_point_start,
-            "pending_point_source_path": self.pending_point_source_path,
-            "next_point_id": self.next_point_id,
-            "selected_point_id": self.selected_point_id,
-            "capture_state": self.capture_state,
-            "points": [
-                {
-                    "id": point.id,
-                    "winner": point.winner,
-                    "is_highlight": point.is_highlight,
-                    "clips": [asdict(clip) for clip in point.clips],
-                    "overlay_at_start": asdict(point.overlay_at_start) if point.overlay_at_start else None,
-                    "overlay_at_end": asdict(point.overlay_at_end) if point.overlay_at_end else None,
-                }
-                for point in self.points
-            ],
-            "segments": [asdict(seg) for seg in self.segments],
-            "state": {
+        doc = project_io.ProjectDocument(
+            input_paths=list(self.input_paths),
+            current_clip_index=self.active_clip_combo.currentIndex(),
+            pending_point_start=self.pending_point_start,
+            pending_point_source_path=self.pending_point_source_path,
+            next_point_id=self.next_point_id,
+            selected_point_id=self.selected_point_id,
+            capture_state=self._capture_state_name(),
+            points=self.points,
+            segments=self.segments,
+            state={
                 "points_a": self.points_a,
                 "points_b": self.points_b,
                 "tb_points_a": self.tb_points_a,
@@ -3629,7 +2841,9 @@ class MainWindow(QMainWindow):
                 "intro_frame_ref": self.intro_frame_ref,
                 "outro_frame_ref": self.outro_frame_ref,
             },
-        }
+            version=4,
+        )
+        return project_io.serialize_project_document(doc)
 
     def save_project(self) -> None:
         output_path, _ = QFileDialog.getSaveFileName(
@@ -3694,28 +2908,21 @@ class MainWindow(QMainWindow):
             self._show_themed_error("Errore caricamento progetto", str(exc))
 
     def _load_project_data(self, data: dict, source_label: str) -> None:
-        input_paths = data.get("input_paths", [])
-        if not isinstance(input_paths, list):
-            raise ValueError("Formato progetto non valido: input_paths.")
-        existing_paths = [p for p in input_paths if isinstance(p, str) and os.path.exists(p)]
-        if not existing_paths:
-            raise ValueError("Nessun file video sorgente trovato sul disco.")
-
-        self.input_paths = existing_paths
+        loaded = project_io.deserialize_project_document(data, require_existing_source=True)
+        self.input_paths = loaded.input_paths
         self.active_clip_combo.blockSignals(True)
         self.active_clip_combo.clear()
         for idx, path in enumerate(self.input_paths, 1):
             self.active_clip_combo.addItem(f"{idx}. {os.path.basename(path)}", path)
         self.active_clip_combo.blockSignals(False)
 
-        clip_index = int(data.get("current_clip_index", 0))
-        clip_index = min(max(0, clip_index), len(self.input_paths) - 1)
+        clip_index = loaded.current_clip_index
         self.active_clip_combo.setCurrentIndex(clip_index)
         self.input_path = self.input_paths[clip_index]
         self.player.setSource(QUrl.fromLocalFile(self.input_path))
         self._update_source_fps_status(self.input_path)
 
-        state = data.get("state", {})
+        state = loaded.state
         self.points_a = int(state.get("points_a", 0))
         self.points_b = int(state.get("points_b", 0))
         self.tb_points_a = int(state.get("tb_points_a", 0))
@@ -3724,30 +2931,8 @@ class MainWindow(QMainWindow):
         self.games_b = int(state.get("games_b", 0))
         self.sets_a = int(state.get("sets_a", 0))
         self.sets_b = int(state.get("sets_b", 0))
-        raw_completed_sets = state.get("completed_sets", [])
-        parsed_completed_sets: list[tuple[int, int]] = []
-        if isinstance(raw_completed_sets, list):
-            for item in raw_completed_sets:
-                if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    try:
-                        parsed_completed_sets.append((int(item[0]), int(item[1])))
-                    except (TypeError, ValueError):
-                        continue
-        self.completed_sets = parsed_completed_sets
-        raw_tb_loser_points = state.get("completed_set_tb_loser_points", [])
-        parsed_tb_loser_points: list[int | None] = []
-        if isinstance(raw_tb_loser_points, list):
-            for item in raw_tb_loser_points:
-                if item is None:
-                    parsed_tb_loser_points.append(None)
-                else:
-                    try:
-                        parsed_tb_loser_points.append(int(item))
-                    except (TypeError, ValueError):
-                        parsed_tb_loser_points.append(None)
-        while len(parsed_tb_loser_points) < len(self.completed_sets):
-            parsed_tb_loser_points.append(None)
-        self.completed_set_tb_loser_points = parsed_tb_loser_points[: len(self.completed_sets)]
+        self.completed_sets = list(state.get("completed_sets", []))
+        self.completed_set_tb_loser_points = list(state.get("completed_set_tb_loser_points", []))
         self.in_tiebreak = bool(state.get("in_tiebreak", False))
         self.tiebreak_target = int(state.get("tiebreak_target", 7))
         self.tiebreak_super = bool(state.get("tiebreak_super", False))
@@ -3767,7 +2952,7 @@ class MainWindow(QMainWindow):
         self.best_of.setCurrentIndex(int(state.get("best_of_index", 0)))
         self.deciding_set_mode.setCurrentIndex(int(state.get("deciding_set_mode_index", 0)))
         saved_server_idx = int(state.get("server_index", 0))
-        payload_version = int(data.get("version", 0))
+        payload_version = loaded.payload_version
         if self.current_server in ("A", "B"):
             combo_server: str | None = self.current_server
         else:
@@ -3807,109 +2992,16 @@ class MainWindow(QMainWindow):
         self.games_a_input.setText(str(self.games_a))
         self.games_b_input.setText(str(self.games_b))
 
-        def _parse_overlay(raw: dict | None) -> OverlayState:
-            ov = raw or {}
-            return OverlayState(
-                player_a=str(ov.get("player_a", "Giocatore A")),
-                player_b=str(ov.get("player_b", "Giocatore B")),
-                sets_a=int(ov.get("sets_a", 0)),
-                sets_b=int(ov.get("sets_b", 0)),
-                games_a=int(ov.get("games_a", 0)),
-                games_b=int(ov.get("games_b", 0)),
-                points_a=str(ov.get("points_a", "0")),
-                points_b=str(ov.get("points_b", "0")),
-                server=str(ov.get("server", "A")),
-                tournament=str(ov.get("tournament", "Amateur Tennis Tour")),
-                overlay_corner=str(ov.get("overlay_corner", "Top Left")),
-                overlay_scale=float(ov.get("overlay_scale", 1.0)),
-                set_col1_a=str(ov.get("set_col1_a", ov.get("games_a", "0"))),
-                set_col1_b=str(ov.get("set_col1_b", ov.get("games_b", "0"))),
-                set_col2_a=str(ov.get("set_col2_a", "")),
-                set_col2_b=str(ov.get("set_col2_b", "")),
-                alert_banner=str(ov.get("alert_banner", "")),
-                flag_a_code=str(ov.get("flag_a_code", "")),
-                flag_b_code=str(ov.get("flag_b_code", "")),
-                flag_a_path=str(ov.get("flag_a_path", "")),
-                flag_b_path=str(ov.get("flag_b_path", "")),
-            )
+        self.points = loaded.points
+        self.next_point_id = loaded.next_point_id
 
-        self.points = []
-        raw_points = data.get("points", [])
-        if isinstance(raw_points, list) and raw_points:
-            for raw_point in raw_points:
-                clips: list[PointClip] = []
-                for raw_clip in raw_point.get("clips", []):
-                    src = raw_clip.get("source_path")
-                    if not src or not os.path.exists(src):
-                        continue
-                    start = float(raw_clip.get("start", 0.0))
-                    end = float(raw_clip.get("end", 0.0))
-                    if end - start <= 0:
-                        continue
-                    clips.append(PointClip(start=start, end=end, source_path=src))
-                if not clips:
-                    continue
-                raw_id = raw_point.get("id")
-                try:
-                    point_id = int(raw_id)
-                except (TypeError, ValueError):
-                    point_id = self.next_point_id
-                    self.next_point_id += 1
-                point = PointRecord(
-                    id=point_id,
-                    winner=raw_point.get("winner") if raw_point.get("winner") in ("A", "B") else None,
-                    is_highlight=bool(raw_point.get("is_highlight", False)),
-                    clips=clips,
-                    overlay_at_start=_parse_overlay(raw_point.get("overlay_at_start")),
-                    overlay_at_end=_parse_overlay(raw_point.get("overlay_at_end"))
-                    if raw_point.get("overlay_at_end") is not None
-                    else None,
-                )
-                self.points.append(point)
-        else:
-            # Legacy migration rule: 1 segment -> 1 point with one clip.
-            raw_segments = data.get("segments", [])
-            for raw_seg in raw_segments:
-                src = raw_seg.get("source_path")
-                if not src or not os.path.exists(src):
-                    continue
-                start = float(raw_seg.get("start", 0.0))
-                end = float(raw_seg.get("end", 0.0))
-                if end - start <= 0:
-                    continue
-                ov = _parse_overlay(raw_seg.get("overlay", {}))
-                point = PointRecord(
-                    id=self.next_point_id,
-                    winner=None,
-                    is_highlight=bool(raw_seg.get("is_highlight", False)),
-                    clips=[PointClip(start=start, end=end, source_path=src)],
-                    overlay_at_start=ov,
-                    overlay_at_end=None,
-                )
-                self.next_point_id += 1
-                self.points.append(point)
-
-        raw_next_point_id = data.get("next_point_id", 1)
-        try:
-            loaded_next_point_id = int(raw_next_point_id)
-        except (TypeError, ValueError):
-            loaded_next_point_id = 1
-        if self.points:
-            inferred_next = max(point.id for point in self.points) + 1
-            self.next_point_id = max(loaded_next_point_id, inferred_next)
-        else:
-            self.next_point_id = max(1, loaded_next_point_id)
-
-        self.capture_state = "IDLE"
+        loaded_capture_state = normalize_capture_state(loaded.capture_state)
+        self._set_capture_state(CaptureState.IDLE)
         self.open_point_id = None
         self.open_clip_start = None
         self.open_clip_source_path = None
         self.initial_server_explicitly_set = True
-        selected_point_id = data.get("selected_point_id")
-        try:
-            self.selected_point_id = int(selected_point_id) if selected_point_id is not None else None
-        except (TypeError, ValueError):
-            self.selected_point_id = None
+        self.selected_point_id = loaded.selected_point_id
         self._sync_selected_point_index_from_id()
         self._sync_selected_point_from_timeline()
         self._sync_legacy_pending_fields()
@@ -3919,8 +3011,40 @@ class MainWindow(QMainWindow):
         self.refresh_segments()
         self.update_overlay()
         self._refresh_shell_empty_states()
-        self.set_status(f"Progetto caricato: {source_label}")
+        base_status = f"Progetto caricato: {source_label}"
+        if loaded.requires_reset_open_session and loaded_capture_state != CaptureState.IDLE:
+            base_status += " | sessione di registrazione aperta azzerata per sicurezza"
+        if loaded.warnings:
+            self._show_project_load_warnings(loaded.warnings)
+            base_status += f" | {len(loaded.warnings)} avviso/i in caricamento"
+        self.set_status(base_status)
         self.autosave_project()
+
+    def _show_project_load_warnings(self, warnings: list[str]) -> None:
+        if not warnings:
+            return
+        unique = []
+        seen: set[str] = set()
+        for code in warnings:
+            if code in seen:
+                continue
+            seen.add(code)
+            unique.append(code)
+        mapping = {
+            "clip_skipped_invalid": "Alcune clip non valide sono state ignorate.",
+            "point_skipped_no_valid_clips": "Alcuni punti senza clip valide sono stati ignorati.",
+            "point_entry_invalid": "Alcune voci punto non valide sono state ignorate.",
+            "legacy_segment_skipped_invalid": "Alcuni segmenti legacy non validi sono stati ignorati.",
+        }
+        lines = [mapping.get(code, f"Avviso caricamento: {code}") for code in unique[:6]]
+        extra = len(unique) - len(lines)
+        if extra > 0:
+            lines.append(f"... e altri {extra} avvisi.")
+        QMessageBox.warning(
+            self,
+            "Avvisi caricamento progetto",
+            "\n".join(lines),
+        )
 
     def current_time_sec(self) -> float:
         return self.player.position() / 1000.0
@@ -3953,26 +3077,20 @@ class MainWindow(QMainWindow):
             self.set_status("Seleziona il servitore iniziale per iniziare il match")
             self.update_overlay()
             return
-        if self.capture_state != "IDLE":
+        if not self._is_capture_state(CaptureState.IDLE):
             self.set_status("C'e' gia' un punto in registrazione.")
             return
         now = self.current_time_sec()
-        point = PointRecord(
-            id=self.next_point_id,
-            winner=None,
-            is_highlight=False,
-            clips=[],
-            overlay_at_start=self._clone_overlay_state(self.current_overlay_state()),
-            overlay_at_end=None,
+        res = point_workflow.start_point_session(
+            self._workflow_snapshot(),
+            now=now,
+            source_path=self.input_path,
+            overlay_at_start=self.current_overlay_state(),
         )
-        self.next_point_id += 1
-        self.points.append(point)
-        self.open_point_id = point.id
-        self.open_clip_start = now
-        self.open_clip_source_path = self.input_path
-        self.capture_state = "RECORDING"
-        self.selected_point_index = len(self.points) - 1
-        self.selected_point_id = point.id
+        if not res.allowed:
+            self.set_status("C'e' gia' un punto in registrazione.")
+            return
+        self._apply_workflow_state(res.state)
         self._sync_legacy_pending_fields()
         self.update_highlight_controls()
         self._refresh_point_open_chip()
@@ -4109,29 +3227,35 @@ class MainWindow(QMainWindow):
             self.ui_shell.source_fps_label.setText("FPS: --")
 
     def _close_open_clip(self) -> bool:
-        if self.capture_state != "RECORDING":
+        if not self._is_capture_state(CaptureState.RECORDING):
             return False
         if not self.input_path or self.open_clip_start is None or not self.open_clip_source_path:
             return False
-        point_idx = self._get_open_point_index()
-        if point_idx is None:
-            return False
-        point = self.points[point_idx]
-        start_path = self.open_clip_source_path
-        end_path = self.input_path
-        created = self._append_clip_interval(
-            point=point,
-            start_source=start_path,
-            start_time=self.open_clip_start,
-            end_source=end_path,
-            end_time=self.current_time_sec(),
+        source_order, durations, err = self._build_source_order_and_durations(
+            start_source=self.open_clip_source_path,
+            end_source=self.input_path,
         )
-        if created <= 0:
-            self.set_status("Durata clip troppo corta.")
+        if err:
+            self.set_status(err)
             return False
-        self.open_clip_start = None
-        self.open_clip_source_path = None
-        self.capture_state = "PAUSED_WITHIN_POINT"
+        res = point_workflow.pause_clip_session(
+            self._workflow_snapshot(),
+            now=self.current_time_sec(),
+            end_source=self.input_path,
+            source_order=source_order,
+            source_duration_map=durations,
+        )
+        if not res.allowed:
+            if res.reason == "clip_too_short":
+                self.set_status("Durata clip troppo corta.")
+            elif res.reason == "invalid_source_order":
+                self.set_status("Intervallo clip non valido: la sorgente finale precede quella iniziale.")
+            elif res.reason == "invalid_source_range":
+                self.set_status("Intervallo clip non valido: sorgente iniziale/finale non trovata.")
+            elif res.reason == "missing_duration":
+                self.set_status("Impossibile leggere la durata clip.")
+            return False
+        self._apply_workflow_state(res.state)
         self._sync_legacy_pending_fields()
         self._rebuild_segments_from_points()
         self.refresh_segments()
@@ -4139,19 +3263,19 @@ class MainWindow(QMainWindow):
 
     def close_current_point(self) -> bool:
         # Compatibility entry-point used by old call sites; now it finalizes only when recording.
-        if self.capture_state not in ("RECORDING", "PAUSED_WITHIN_POINT"):
+        if not self._is_capture_state(CaptureState.RECORDING, CaptureState.PAUSED_WITHIN_POINT):
             return False
         point_idx = self._get_open_point_index()
         if point_idx is None:
             return False
-        if self.capture_state == "RECORDING":
+        if self._is_capture_state(CaptureState.RECORDING):
             if not self._close_open_clip():
                 return False
         point = self.points[point_idx]
         if len(point.clips) == 0:
             self.set_status("Impossibile chiudere un punto vuoto.")
             return False
-        self.capture_state = "IDLE"
+        self._set_capture_state(CaptureState.IDLE)
         self.open_point_id = None
         self.open_clip_start = None
         self.open_clip_source_path = None
@@ -4164,26 +3288,28 @@ class MainWindow(QMainWindow):
     def mark_end(self) -> None:
         if not self.input_path:
             return
-        if self.capture_state == "IDLE":
+        if self._is_capture_state(CaptureState.IDLE):
             self.set_status("Segna prima un inizio punto.")
             return
-        if self.capture_state == "RECORDING":
+        if self._is_capture_state(CaptureState.RECORDING):
             if self._close_open_clip():
                 self.set_status("Clip in pausa. Premi Riprendi clip per continuare il punto.")
                 self.update_overlay()
                 self.autosave_project()
             return
         # PAUSED_WITHIN_POINT -> RECORDING
-        point_idx = self._get_open_point_index()
-        if point_idx is None:
-            self.capture_state = "IDLE"
+        res = point_workflow.resume_clip_session(
+            self._workflow_snapshot(),
+            now=self.current_time_sec(),
+            source_path=self.input_path,
+        )
+        if not res.allowed:
+            self._set_capture_state(CaptureState.IDLE)
             self._sync_legacy_pending_fields()
             self.set_status("Stato punto non valido, reset a IDLE.")
             self.update_overlay()
             return
-        self.open_clip_start = self.current_time_sec()
-        self.open_clip_source_path = self.input_path
-        self.capture_state = "RECORDING"
+        self._apply_workflow_state(res.state)
         self._sync_legacy_pending_fields()
         self.set_status("Clip ripresa.")
         self.update_overlay()
@@ -4267,7 +3393,7 @@ class MainWindow(QMainWindow):
             )
             item = QListWidgetItem(row)
             item.setData(Qt.ItemDataRole.UserRole, point.id)
-            item.setToolTip(f"Highlight punto #{point.id}")
+            item.setToolTip(f"Punto in highlights #{point.id}")
             self.highlights_list.addItem(item)
         self._refresh_shell_empty_states()
 
@@ -4357,7 +3483,7 @@ class MainWindow(QMainWindow):
             if self.selected_point_index is not None and 0 <= self.selected_point_index < len(self.points)
             else None
         )
-        can_toggle = self.capture_state == "IDLE" and selected_point is not None
+        can_toggle = self._is_capture_state(CaptureState.IDLE) and selected_point is not None
         if selected_point is not None and selected_point.is_highlight:
             self.add_last_highlight_btn.setText("Rimuovi dagli highlights")
         else:
@@ -4367,15 +3493,15 @@ class MainWindow(QMainWindow):
         self.remove_highlight_btn.setEnabled(self.highlights_list.currentRow() >= 0)
         can_remove_last = (
             selected_point is not None
-            and self.capture_state == "IDLE"
+            and self._is_capture_state(CaptureState.IDLE)
             and len(self.points) > 0
             and self.points[-1].id == selected_point.id
         )
         self.remove_point_btn.setEnabled(can_remove_last)
-        self.export_selected_point_btn.setEnabled(selected_point is not None and self.capture_state == "IDLE")
+        self.export_selected_point_btn.setEnabled(selected_point is not None and self._is_capture_state(CaptureState.IDLE))
 
     def add_last_point_to_highlights(self) -> None:
-        if self.capture_state != "IDLE":
+        if not self._is_capture_state(CaptureState.IDLE):
             self.set_status("Chiudi prima il punto corrente.")
             return
         self._sync_selected_point_index_from_id()
@@ -4403,11 +3529,11 @@ class MainWindow(QMainWindow):
             return
         target.is_highlight = False
         self.refresh_segments()
-        self.set_status(f"Highlight rimosso dal punto #{target.id}.")
+        self.set_status(f"Punto #{target.id} rimosso dagli highlights.")
         self.autosave_project()
 
     def clear_segments(self) -> None:
-        self.capture_state = "IDLE"
+        self._set_capture_state(CaptureState.IDLE)
         self.open_point_id = None
         self.open_clip_start = None
         self.open_clip_source_path = None
@@ -4481,16 +3607,14 @@ class MainWindow(QMainWindow):
             self.undo_stack.pop(0)
 
     def undo_last_action(self) -> None:
-        if self.capture_state == "IDLE":
+        if self._is_capture_state(CaptureState.IDLE):
             self.set_status("Nessun punto in corso da annullare.")
             return
-        open_idx = self._get_open_point_index()
-        if open_idx is not None:
-            del self.points[open_idx]
-        self.capture_state = "IDLE"
-        self.open_point_id = None
-        self.open_clip_start = None
-        self.open_clip_source_path = None
+        res = point_workflow.cancel_open_point_session(self._workflow_snapshot())
+        if not res.allowed:
+            self.set_status("Nessun punto in corso da annullare.")
+            return
+        self._apply_workflow_state(res.state)
         self._sync_legacy_pending_fields()
         self._sync_selected_point_from_timeline()
         self._rebuild_segments_from_points()
@@ -4507,26 +3631,22 @@ class MainWindow(QMainWindow):
         if self.selected_point_index is None:
             self.set_status("Seleziona il punto da rimuovere.")
             return
-        if self.selected_point_index != len(self.points) - 1:
+        if not point_workflow.can_remove_last_point(
+            self.points, self.selected_point_id, self._capture_state_name()
+        ):
             self.set_status("E' possibile rimuovere solo l'ultimo punto.")
             return
-        removed = self.points.pop()
-        self.capture_state = "IDLE"
-        self.open_point_id = None
-        self.open_clip_start = None
-        self.open_clip_source_path = None
-        if self.points:
-            self.selected_point_index = len(self.points) - 1
-            self.selected_point_id = self.points[-1].id
-        else:
-            self.selected_point_index = None
-            self.selected_point_id = None
+        res = point_workflow.remove_last_point(self._workflow_snapshot())
+        if not res.allowed:
+            self.set_status("E' possibile rimuovere solo l'ultimo punto.")
+            return
+        self._apply_workflow_state(res.state)
         self._sync_legacy_pending_fields()
         self._replay_score_from_points()
         self._rebuild_segments_from_points()
         self.refresh_segments()
         self.update_overlay()
-        self.set_status(f"Punto #{removed.id} rimosso.")
+        self.set_status(f"Punto #{res.removed_point_id} rimosso.")
         self.autosave_project()
 
     def _start_tiebreak(self, target: int, super_mode: bool) -> None:
@@ -4670,42 +3790,70 @@ class MainWindow(QMainWindow):
     def tennis_point_winner(self, side: str) -> None:
         if not self.input_path:
             return
-        if self.capture_state not in ("RECORDING", "PAUSED_WITHIN_POINT"):
+        if not self._is_capture_state(CaptureState.RECORDING, CaptureState.PAUSED_WITHIN_POINT):
             self.set_status("Avvia prima un punto con Inizio punto.")
             return
-        point_idx = self._get_open_point_index()
-        if point_idx is None:
-            self.capture_state = "IDLE"
-            self._sync_legacy_pending_fields()
-            self.set_status("Stato punto non valido, reset a IDLE.")
-            self.update_overlay()
+        start_source = self.open_clip_source_path or self.input_path
+        source_order, durations, err = self._build_source_order_and_durations(
+            start_source=start_source,
+            end_source=self.input_path,
+        )
+        if err:
+            self.set_status(err)
             return
-        if self.capture_state == "RECORDING":
-            if not self._close_open_clip():
+        res = point_workflow.finalize_point_session(
+            self._workflow_snapshot(),
+            winner=side,
+            now=self.current_time_sec(),
+            end_source=self.input_path,
+            source_order=source_order,
+            source_duration_map=durations,
+        )
+        if not res.allowed:
+            if res.reason == "invalid_open_point":
+                self._set_capture_state(CaptureState.IDLE)
+                self._sync_legacy_pending_fields()
+                self.set_status("Stato punto non valido, reset a IDLE.")
+                self.update_overlay()
                 return
-            # _close_open_clip porta lo stato in PAUSED_WITHIN_POINT
-            point_idx = self._get_open_point_index()
-            if point_idx is None:
-                self.set_status("Errore interno nel completamento del punto.")
+            if res.reason in ("empty_point", "clip_too_short"):
+                self.set_status("Impossibile assegnare il punto: nessuna clip valida registrata.")
                 return
-        point = self.points[point_idx]
-        if len(point.clips) == 0:
-            self.set_status("Impossibile assegnare il punto: nessuna clip valida registrata.")
+            if res.reason in ("not_in_progress",):
+                self.set_status("Avvia prima un punto con Inizio punto.")
+                return
+            if res.reason == "invalid_source_order":
+                self.set_status("Intervallo clip non valido: la sorgente finale precede quella iniziale.")
+                return
+            if res.reason == "invalid_source_range":
+                self.set_status("Intervallo clip non valido: sorgente iniziale/finale non trovata.")
+                return
+            if res.reason == "missing_duration":
+                self.set_status("Impossibile leggere la durata clip.")
+                return
+            self.set_status("Errore interno nel completamento del punto.")
             return
-        point.winner = side
+
+        self._apply_workflow_state(res.state)
         self._replay_score_from_points()
-        point.overlay_at_end = self._clone_overlay_state(self.current_overlay_state())
-        self.capture_state = "IDLE"
-        self.open_point_id = None
-        self.open_clip_start = None
-        self.open_clip_source_path = None
-        self.selected_point_index = point_idx
-        self.selected_point_id = point.id
+        finalized_id = res.finalized_point_id
+        if finalized_id is not None:
+            for idx, point in enumerate(self.points):
+                if point.id == finalized_id:
+                    # Compatibility snapshot only; runtime preview/export derives
+                    # scoreboard from replayed match state.
+                    point.overlay_at_end = self._clone_overlay_state(self.current_overlay_state())
+                    self.selected_point_index = idx
+                    self.selected_point_id = point.id
+                    break
         self._sync_legacy_pending_fields()
         self._rebuild_segments_from_points()
         self.refresh_segments()
         self.update_overlay()
-        self.set_status(f"Punto #{point.id} assegnato al giocatore {side}.")
+        if finalized_id is not None:
+            self.set_status(f"Punto #{finalized_id} assegnato al giocatore {side}.")
+        else:
+            self.set_status(f"Punto assegnato al giocatore {side}.")
         self.autosave_project()
 
     def reset_score(self) -> None:
@@ -4752,6 +3900,8 @@ class MainWindow(QMainWindow):
         ):
             return
         for point in self.points:
+            # Legacy compatibility update only. Runtime server/scoreboard is
+            # derived from initial server + winners progression.
             if point.overlay_at_start is not None:
                 point.overlay_at_start.server = server
             if point.overlay_at_end is not None:
@@ -4763,42 +3913,11 @@ class MainWindow(QMainWindow):
         self.autosave_project()
 
     def _build_export_segments(self, source_segments: list[Segment]) -> list[Segment]:
-        export_corner = self.overlay_corner_combo.currentText()
-        export_scale = self.overlay_widget.scale_factor
-        export_segments: list[Segment] = []
-        for seg in source_segments:
-            export_segments.append(
-                Segment(
-                    start=seg.start,
-                    end=seg.end,
-                    source_path=seg.source_path,
-                    overlay=OverlayState(
-                        player_a=seg.overlay.player_a,
-                        player_b=seg.overlay.player_b,
-                        sets_a=seg.overlay.sets_a,
-                        sets_b=seg.overlay.sets_b,
-                        games_a=seg.overlay.games_a,
-                        games_b=seg.overlay.games_b,
-                        points_a=seg.overlay.points_a,
-                        points_b=seg.overlay.points_b,
-                        server=seg.overlay.server,
-                        tournament=seg.overlay.tournament,
-                        overlay_corner=export_corner,
-                        overlay_scale=export_scale,
-                        set_col1_a=seg.overlay.set_col1_a,
-                        set_col1_b=seg.overlay.set_col1_b,
-                        set_col2_a=seg.overlay.set_col2_a,
-                        set_col2_b=seg.overlay.set_col2_b,
-                        alert_banner=seg.overlay.alert_banner,
-                        flag_a_code=seg.overlay.flag_a_code,
-                        flag_b_code=seg.overlay.flag_b_code,
-                        flag_a_path=seg.overlay.flag_a_path,
-                        flag_b_path=seg.overlay.flag_b_path,
-                    ),
-                    is_highlight=seg.is_highlight,
-                )
-            )
-        return export_segments
+        return export_service.build_export_segments_for_render(
+            source_segments,
+            export_corner=self.overlay_corner_combo.currentText(),
+            export_scale=self.overlay_widget.scale_factor,
+        )
 
     def _start_export_job(self, output_path: str, source_segments: list[Segment], export_kind: str) -> None:
         self.current_export_kind = export_kind
@@ -4812,7 +3931,7 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.export_highlights_btn.setEnabled(False)
         self.export_selected_point_btn.setEnabled(False)
-        self.set_status(f"Export {export_kind} in corso...")
+        self.set_status(f"Esportazione {export_kind} in corso...")
         if self.export_progress_dialog is not None:
             self.export_progress_dialog.close()
             self.export_progress_dialog = None
@@ -4821,7 +3940,6 @@ class MainWindow(QMainWindow):
         self.export_progress_dialog.set_mode(export_kind, output_path)
         self.export_progress_dialog.set_progress(0, 0.0, 0.0, "Preparazione export...")
         self.export_progress_dialog.show()
-        export_segments = self._build_export_segments(source_segments)
         intro_cfg = None
         outro_cfg = None
         if export_kind in {"condensato", "highlights", "punto"}:
@@ -4841,12 +3959,28 @@ class MainWindow(QMainWindow):
                     self.export_progress_dialog.close()
                     self.export_progress_dialog = None
                 return
+        prepared = export_service.prepare_export_payload(
+            source_segments,
+            export_corner=self.overlay_corner_combo.currentText(),
+            export_scale=self.overlay_widget.scale_factor,
+            include_intro=self.enable_intro_checkbox.isChecked(),
+            include_outro=self.enable_outro_checkbox.isChecked(),
+            intro_cfg=intro_cfg,
+            outro_cfg=outro_cfg,
+        )
+        if prepared.error is not None:
+            self.export_btn.setEnabled(True)
+            self.update_highlight_controls()
+            if self.export_progress_dialog is not None:
+                self.export_progress_dialog.close()
+                self.export_progress_dialog = None
+            return
         self.export_worker = ExportWorker(
             output_path=output_path,
-            segments=export_segments,
+            segments=prepared.export_segments,
             include_overlay=self.include_overlay.isChecked(),
-            intro_clip=intro_cfg,
-            outro_clip=outro_cfg,
+            intro_clip=prepared.intro_clip,
+            outro_clip=prepared.outro_clip,
         )
         self.export_worker.progress.connect(self.on_export_progress)
         self.export_worker.finished_ok.connect(self.on_export_ok)
@@ -4882,7 +4016,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Errore", "Carica un video prima di esportare.")
             return
         self._rebuild_segments_from_points()
-        highlight_segments = [seg for seg in self.segments if seg.is_highlight]
+        highlight_segments = export_service.select_highlight_segments(self.segments)
         if not highlight_segments:
             QMessageBox.warning(self, "Errore", "Nessun highlight selezionato.")
             return
@@ -4911,14 +4045,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Errore", "Il punto selezionato non contiene clip valide.")
             return
         self._rebuild_segments_from_points()
-        selected_segments = [
-            seg
-            for seg in self._flatten_points_to_segments()
-            if any(
-                clip.source_path == seg.source_path and abs(clip.start - seg.start) < 1e-6 and abs(clip.end - seg.end) < 1e-6
-                for clip in point.clips
-            )
-        ]
+        selected_segments = export_service.select_segments_for_point(point, self._flatten_points_to_segments())
         if not selected_segments:
             QMessageBox.warning(self, "Errore", "Nessun segmento valido per il punto selezionato.")
             return
@@ -4950,7 +4077,7 @@ class MainWindow(QMainWindow):
         self.update_highlight_controls()
         if self.export_progress_dialog is not None:
             self.export_progress_dialog.set_success(self.current_export_kind, output_path, chunks)
-        self.set_status(f"Export {self.current_export_kind} completato: {output_path} ({chunks} clip).")
+        self.set_status(f"Esportazione {self.current_export_kind} completata: {output_path} ({chunks} clip).")
 
     def on_export_failed(self, message: str) -> None:
         for frame_path in list(self._ephemeral_export_frames):
@@ -4964,7 +4091,7 @@ class MainWindow(QMainWindow):
         self.update_highlight_controls()
         if self.export_progress_dialog is not None:
             self.export_progress_dialog.set_error(self.current_export_kind, message)
-        self.set_status(f"Export {self.current_export_kind} fallito: {message}")
+        self.set_status(f"Esportazione {self.current_export_kind} fallita: {message}")
 
     def clear_edit_focus(self) -> None:
         for field in [
