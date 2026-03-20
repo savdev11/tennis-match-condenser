@@ -49,6 +49,7 @@ from domain.enums import CaptureState
 from domain import runtime_overlay, scoring_engine
 from domain import point_workflow
 from domain import project_io
+from domain import segment_projection
 
 APP_VERSION = "1.7.0"
 OVERLAY_SCALE_PRESETS = {
@@ -2459,24 +2460,13 @@ class MainWindow(QMainWindow):
         self.points_list.blockSignals(False)
 
     def _flatten_points_to_segments(self) -> list[Segment]:
-        flat: list[Segment] = []
-        for point in self._ordered_points():
-            overlay_ref = self.derive_overlay_state_before_point(point)
-            if overlay_ref is None:
-                overlay_ref = self.current_overlay_state()
-            for clip in point.clips:
-                if clip.end - clip.start <= 0:
-                    continue
-                flat.append(
-                    Segment(
-                        start=clip.start,
-                        end=clip.end,
-                        source_path=clip.source_path,
-                        overlay=self._clone_overlay_state(overlay_ref),
-                        is_highlight=point.is_highlight,
-                    )
-                )
-        return flat
+        return segment_projection.flatten_points_to_segments(
+            points=self.points,
+            settings=self._build_match_settings_snapshot(),
+            source_order=list(self.input_paths),
+            durations=None,
+            default_overlay=self.current_overlay_state(),
+        )
 
     def _overlay_for_point_preview(self, point: PointRecord) -> OverlayState | None:
         if point.winner in ("A", "B"):
