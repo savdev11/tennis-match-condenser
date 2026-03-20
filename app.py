@@ -50,7 +50,7 @@ from services import flags_service
 from ui.dialogs import ExportProgressDialog
 from ui.widgets import ScoreboardOverlayWidget, VideoOverlayContainer
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 OVERLAY_SCALE_PRESETS = {
     "80%": 1.10,
     "100%": 1.35,
