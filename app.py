@@ -3608,7 +3608,30 @@ class MainWindow(QMainWindow):
 
     def undo_last_action(self) -> None:
         if self._is_capture_state(CaptureState.IDLE):
-            self.set_status("Nessun punto in corso da annullare.")
+            if not self.points:
+                self.set_status("Nessuna azione da annullare.")
+                return
+            # In idle, Undo rolls back the latest finalized point (same semantics
+            # of "Rimuovi punto" on the last point) and refreshes live score.
+            self.selected_point_id = self.points[-1].id
+            self._sync_selected_point_index_from_id()
+            if not point_workflow.can_remove_last_point(
+                self.points, self.selected_point_id, self._capture_state_name()
+            ):
+                self.set_status("Nessuna azione da annullare.")
+                return
+            res = point_workflow.remove_last_point(self._workflow_snapshot())
+            if not res.allowed:
+                self.set_status("Nessuna azione da annullare.")
+                return
+            self._apply_workflow_state(res.state)
+            self._sync_legacy_pending_fields()
+            self._replay_score_from_points()
+            self._rebuild_segments_from_points()
+            self.refresh_segments()
+            self.update_overlay()
+            self.set_status(f"Undo completato: punto #{res.removed_point_id} annullato.")
+            self.autosave_project()
             return
         res = point_workflow.cancel_open_point_session(self._workflow_snapshot())
         if not res.allowed:
